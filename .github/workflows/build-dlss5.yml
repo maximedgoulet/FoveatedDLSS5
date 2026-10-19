@@ -1,0 +1,47 @@
+# Builds only renodx-dlss5.addon64 (this patched add-on) on GitHub's Windows
+# runners and attaches it to the run as a downloadable artifact.
+#
+# Use: fork https://github.com/clshortfuse/renodx, put this add-on folder at
+# src/addons/dlss5, copy this file to .github/workflows/build-dlss5.yml, push,
+# then Actions -> "Build DLSS5 add-on" -> Run workflow.
+name: Build DLSS5 add-on
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up shader tools
+        shell: pwsh
+        run: .\scripts\setup-dev-env.ps1 -Update -Tools dxc,slang,glslang
+
+      - name: MSVC environment
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: amd64
+
+      - name: Configure
+        run: cmake --preset vs-x64
+
+      - name: Build dlss5
+        run: cmake --build --preset vs-x64-release --target dlss5 --verbose
+
+      - name: Collect
+        shell: pwsh
+        run: |
+          $out = Get-ChildItem -Recurse -Path build.vs -Filter renodx-dlss5.addon64 | Select-Object -First 1
+          if (-not $out) { throw "renodx-dlss5.addon64 not found" }
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item $out.FullName dist/
+          Get-FileHash dist/renodx-dlss5.addon64 -Algorithm SHA256 | Format-List
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: renodx-dlss5-foveated
+          path: dist/renodx-dlss5.addon64
