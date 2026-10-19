@@ -1,13 +1,21 @@
-# Builds only renodx-dlss5.addon64 (this patched add-on) on GitHub's Windows
-# runners and attaches it to the run as a downloadable artifact.
+# Builds only renodx-dlss5.addon64 (the foveated DLSS 5 NR add-on in
+# src/addons/dlss5) on GitHub's Windows runners.
 #
-# Use: fork https://github.com/clshortfuse/renodx, put this add-on folder at
-# src/addons/dlss5, copy this file to .github/workflows/build-dlss5.yml, push,
-# then Actions -> "Build DLSS5 add-on" -> Run workflow.
+# - Run workflow (manual): builds and attaches the add-on to the run as an
+#   artifact.
+# - Push a tag v* (e.g. v0.1.0): builds, then publishes a GitHub release with
+#   the add-on and its SHA-256 attached. Tags with a suffix (v0.2.0-beta) and
+#   all 0.x versions are marked pre-release. Release notes come from
+#   .github/release-notes/<tag>.md when that file exists.
 name: Build DLSS5 add-on
 
 on:
   workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -39,9 +47,25 @@ jobs:
           if (-not $out) { throw "renodx-dlss5.addon64 not found" }
           New-Item -ItemType Directory -Force dist | Out-Null
           Copy-Item $out.FullName dist/
-          Get-FileHash dist/renodx-dlss5.addon64 -Algorithm SHA256 | Format-List
+          $hash = (Get-FileHash dist/renodx-dlss5.addon64 -Algorithm SHA256).Hash.ToLower()
+          "$hash  renodx-dlss5.addon64" | Out-File -Encoding ascii dist/renodx-dlss5.addon64.sha256
+          "SHA-256: $hash" | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
 
       - uses: actions/upload-artifact@v4
         with:
           name: renodx-dlss5-foveated
-          path: dist/renodx-dlss5.addon64
+          path: dist/
+
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $notes = ".github/release-notes/$tag.md"
+          $ghArgs = @($tag, "dist/renodx-dlss5.addon64", "dist/renodx-dlss5.addon64.sha256",
+                    "--title", "FoveatedDLSS5 $tag", "--verify-tag")
+          if (Test-Path $notes) { $ghArgs += @("--notes-file", $notes) } else { $ghArgs += "--generate-notes" }
+          if ($tag -match '-' -or $tag -match '^v0\.') { $ghArgs += "--prerelease" }
+          gh release create @ghArgs

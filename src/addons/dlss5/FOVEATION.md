@@ -85,11 +85,16 @@ constants: 32 → 36 dwords (grid at dwords 32–35).
 
 ## Status
 
-Not built with the RenoDX toolchain and not run on hardware. Checked:
+Pre-release (v0.1.0). Built with the RenoDX toolchain (MSVC, VS 2022 preset)
+on GitHub Actions. Tested in The Witcher 3 (DX12, native DLSS + frame
+generation) at 7680×2160 on an RTX 4090: foveation active at several centre
+sizes and pass counts, NR engaged on 99.8 % of DLSS frames, no errors, no
+guide-pass fallback.
+
+Also checked before the first build:
 
 - every shader compiles (glslang HLSL front end); constant offsets verified by reflection,
-- the add-on parses with clang against mingw-w64 / NGX / Streamline / ReShade headers with **zero new errors vs. the unmodified source** (deliberate typos in the new code are caught),
-- warp math and clamping unit-tested at all five resolutions above; encode → NR edit → resolve simulated per axis (placement error ≤4e-4), warped motion matches exact reprojection.
+- warp math and clamping unit-tested at 7680×2160, 5120×2160, 5160×1400, 3840×2160 and 3440×1440; encode → NR edit → resolve simulated per axis (placement error ≤4e-4), warped motion matches exact reprojection.
 
 ## Known limits
 

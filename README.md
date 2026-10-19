@@ -4,7 +4,7 @@ A ReShade add-on that runs NVIDIA DLSS 5 Neural Rendering (NR) at **full resolut
 
 It is the open-source RenoDX DLSS 5 add-on (`renodx-dlss5`, RenoDX-DLSS5-Generic v7.5.0-rc5) with a foveated working grid added. Everything else in the add-on works as before. This repository is a fork of [RenoDX](https://github.com/clshortfuse/renodx), which provides the build system; the add-on lives in [`src/addons/dlss5`](src/addons/dlss5).
 
-> Status: experimental. Not yet validated in-game.
+> Status: pre-release. Tested in The Witcher 3 (DX12, 7680×2160, RTX 4090); other games not yet.
 
 ## How it works
 
@@ -28,7 +28,7 @@ With foveation off, the add-on behaves exactly like the stock one.
 
 ## Install
 
-1. Get `renodx-dlss5.addon64`: open [Actions → Build DLSS5 add-on](../../actions/workflows/build-dlss5.yml), pick the latest green run, and download the `renodx-dlss5-foveated` artifact. To build a fresh one, click **Run workflow**.
+1. Download `renodx-dlss5.addon64` from the latest [release](../../releases). For an unreleased build, open [Actions → Build DLSS5 add-on](../../actions/workflows/build-dlss5.yml) and download the artifact of a green run.
 2. In the game folder (next to the game's `.exe`):
 
 | File | Action |
@@ -135,7 +135,7 @@ Technical details (math, shader changes, performance notes): [`src/addons/dlss5/
 
 ## Building it yourself
 
-The [`Build DLSS5 add-on`](.github/workflows/build-dlss5.yml) workflow builds only this add-on on GitHub's Windows runners. To build locally, follow RenoDX's [build guide](docs/CONTRIBUTING.md), then run:
+The [`Build DLSS5 add-on`](.github/workflows/build-dlss5.yml) workflow builds only this add-on on GitHub's Windows runners. Pushing a `v*` tag builds it and publishes a release (notes from `.github/release-notes/<tag>.md`). To build locally, follow RenoDX's [build guide](docs/CONTRIBUTING.md), then run:
 
 ```
 cmake --preset vs-x64
