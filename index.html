@@ -1,0 +1,256 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FoveatedDLSS5 Comparisons</title>
+<meta name="description" content="Before/after screenshots of FoveatedDLSS5, foveated DLSS 5 neural rendering for ReShade.">
+<style>
+  :root {
+    --bg: #0b0d10;
+    --panel: rgba(16, 19, 24, 0.86);
+    --line: rgba(255, 255, 255, 0.12);
+    --text: #e8eaed;
+    --muted: #9aa3ad;
+    --accent: #76b900;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
+    font: 14px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; overflow: hidden; }
+  header { position: fixed; inset: 0 0 auto 0; z-index: 5; display: flex; gap: 12px; align-items: center;
+    padding: 10px 16px; background: var(--panel); border-bottom: 1px solid var(--line); backdrop-filter: blur(8px); }
+  header h1 { margin: 0; font-size: 15px; font-weight: 600; white-space: nowrap; }
+  header h1 a { color: var(--text); text-decoration: none; }
+  header h1 span { color: var(--accent); }
+  select, button { font: inherit; color: var(--text); background: #1b2028; border: 1px solid var(--line);
+    border-radius: 6px; padding: 5px 10px; cursor: pointer; }
+  button:hover, select:hover { border-color: rgba(255,255,255,0.3); }
+  .spacer { flex: 1; }
+  .zoom { color: var(--muted); font-variant-numeric: tabular-nums; min-width: 4.5em; text-align: right; }
+  #stage { position: fixed; inset: 0; cursor: grab; touch-action: none; }
+  #stage.panning { cursor: grabbing; }
+  #canvas { position: absolute; left: 0; top: 0; transform-origin: 0 0; will-change: transform; }
+  #canvas img { position: absolute; left: 0; top: 0; display: block; user-select: none; -webkit-user-drag: none;
+    image-rendering: auto; }
+  #canvas.pixel img { image-rendering: pixelated; }
+  #right { clip-path: inset(0 0 0 var(--split, 50%)); }
+  #divider { position: fixed; top: 0; bottom: 0; width: 0; z-index: 3; pointer-events: none; }
+  #divider::before { content: ""; position: absolute; top: 0; bottom: 0; left: -1px; width: 2px;
+    background: rgba(255,255,255,0.9); box-shadow: 0 0 6px rgba(0,0,0,0.6); }
+  #handle { position: absolute; top: 50%; left: -20px; width: 40px; height: 40px; margin-top: -20px;
+    border-radius: 50%; background: rgba(16,19,24,0.9); border: 2px solid #fff; pointer-events: auto;
+    cursor: ew-resize; display: grid; place-items: center; touch-action: none; }
+  #handle svg { width: 22px; height: 22px; fill: #fff; }
+  .tag { position: fixed; bottom: 16px; z-index: 4; padding: 5px 10px; border-radius: 6px; background: var(--panel);
+    border: 1px solid var(--line); font-weight: 600; pointer-events: none; }
+  #tagL { left: 16px; } #tagR { right: 16px; }
+  #status { position: fixed; inset: 0; display: grid; place-items: center; z-index: 2; color: var(--muted);
+    pointer-events: none; text-align: center; padding: 16px; }
+  #status b { color: var(--text); }
+  #status[hidden], #divider[hidden] { display: none; }
+  #bar { width: min(320px, 70vw); height: 4px; background: var(--line); border-radius: 2px; margin: 12px auto 0; overflow: hidden; }
+  #bar i { display: block; height: 100%; width: 0; background: var(--accent); transition: width .15s; }
+  #help { position: fixed; left: 50%; bottom: 16px; transform: translateX(-50%); z-index: 4; color: var(--muted);
+    background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 5px 10px; font-size: 12px;
+    white-space: nowrap; }
+  #note { color: var(--muted); font-size: 12px; max-width: 40vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  @media (max-width: 720px) {
+    #help, #note, .zoom { display: none; }
+    header { flex-wrap: wrap; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1><a href="https://github.com/maximedgoulet/FoveatedDLSS5">Foveated<span>DLSS5</span></a></h1>
+  <select id="pick" aria-label="Comparison"></select>
+  <span id="note"></span>
+  <span class="spacer"></span>
+  <span class="zoom" id="zoom">–</span>
+  <button id="fit" title="Fit to window (F)">Fit</button>
+  <button id="one" title="Actual pixels (1)">1:1</button>
+  <button id="swap" title="Swap sides (S)">Swap</button>
+</header>
+
+<div id="stage">
+  <div id="canvas"><img id="left" alt=""><img id="right" alt=""></div>
+</div>
+<div id="divider"><div id="handle" aria-label="Drag to compare" role="slider" tabindex="0">
+  <svg viewBox="0 0 24 24"><path d="M8 5 1 12l7 7V5zm8 0v14l7-7-7-7z"/></svg></div></div>
+<span class="tag" id="tagL"></span><span class="tag" id="tagR"></span>
+<div id="status"><div><b>Loading…</b><div id="bar"><i></i></div></div></div>
+<div id="help">Drag the handle to compare · scroll to zoom · drag to pan · double-click to fit</div>
+
+<script src="comparisons.js"></script>
+<script>
+(() => {
+  const list = window.COMPARISONS || [];
+  const $ = (id) => document.getElementById(id);
+  const stage = $("stage"), canvas = $("canvas"), L = $("left"), R = $("right");
+  const divider = $("divider"), handle = $("handle");
+  let W = 0, H = 0;                 // image size
+  let scale = 1, tx = 0, ty = 0;    // view transform
+  let split = 0.5;                  // divider position, fraction of the window width
+  let swapped = false, current = null;
+
+  // ---- comparison picker -------------------------------------------------
+  const pick = $("pick");
+  list.forEach((c, i) => pick.add(new Option(c.title, String(i))));
+  pick.hidden = list.length < 2;
+  pick.onchange = () => open(list[+pick.value]);
+
+  // ---- loading with progress (21 MB images deserve a bar) ---------------
+  function fetchImage(src, onProgress) {
+    return fetch(src).then((r) => {
+      if (!r.ok) throw new Error(src + " (" + r.status + ")");
+      const total = +r.headers.get("content-length") || 0;
+      if (!r.body || !total) return r.blob();
+      const reader = r.body.getReader(); const parts = []; let got = 0;
+      const pump = () => reader.read().then(({ done, value }) => {
+        if (done) return new Blob(parts);
+        parts.push(value); got += value.length; onProgress(got / total);
+        return pump();
+      });
+      return pump();
+    }).then((blob) => URL.createObjectURL(blob));
+  }
+
+  function status(html, progress) {
+    const s = $("status");
+    if (html === null) { s.hidden = true; return; }
+    s.hidden = false;
+    s.firstElementChild.innerHTML = html + '<div id="bar"><i></i></div>';
+    s.querySelector("#bar i").style.width = ((progress || 0) * 100) + "%";
+  }
+
+  async function open(c) {
+    if (!c) { status("<b>No comparisons yet.</b><br>Add image pairs to comparisons.js."); return; }
+    current = c;
+    history.replaceState(null, "", "?c=" + encodeURIComponent(c.id));
+    $("note").textContent = c.note || "";
+    status("<b>Loading " + c.title + "…</b>", 0);
+    const prog = [0, 0];
+    const upd = () => { const b = document.querySelector("#bar i"); if (b) b.style.width = ((prog[0] + prog[1]) * 50) + "%"; };
+    try {
+      const [a, b] = await Promise.all([
+        fetchImage(c.left.src, (p) => { prog[0] = p; upd(); }),
+        fetchImage(c.right.src, (p) => { prog[1] = p; upd(); }),
+      ]);
+      [L, R].forEach((img) => { if (img.src.startsWith("blob:")) URL.revokeObjectURL(img.src); });
+      L.src = a; R.src = b;
+      await Promise.all([L.decode(), R.decode()]);
+    } catch (e) {
+      status("<b>Could not load the images.</b><br>" + e.message);
+      return;
+    }
+    W = L.naturalWidth; H = L.naturalHeight;
+    canvas.style.width = W + "px"; canvas.style.height = H + "px";
+    R.style.width = W + "px"; R.style.height = H + "px";
+    swapped = false; labels();
+    status(null);
+    fit();
+  }
+
+  function labels() {
+    const [a, b] = swapped ? [current.right, current.left] : [current.left, current.right];
+    $("tagL").textContent = a.label; $("tagR").textContent = b.label;
+  }
+
+  // ---- view --------------------------------------------------------------
+  const top = () => document.querySelector("header").offsetHeight;
+  function apply() {
+    canvas.style.transform = `translate(${tx}px, ${ty}px) scale(${scale})`;
+    canvas.classList.toggle("pixel", scale >= 2);
+    // Clip the right image at the divider, in image coordinates.
+    const x = (split * innerWidth - tx) / scale;
+    const pct = Math.max(0, Math.min(100, (x / W) * 100));
+    R.style.setProperty("--split", pct + "%");
+    divider.style.left = (split * innerWidth) + "px";
+    $("zoom").textContent = Math.round(scale * 100) + "%";
+  }
+  function fit() {
+    const vw = innerWidth, vh = innerHeight - top();
+    scale = Math.min(vw / W, vh / H);
+    tx = (vw - W * scale) / 2; ty = top() + (vh - H * scale) / 2;
+    apply();
+  }
+  function zoomAt(f, cx, cy) {
+    const min = Math.min(innerWidth / W, (innerHeight - top()) / H) * 0.5;
+    const next = Math.max(min, Math.min(16, scale * f));
+    tx = cx - (cx - tx) * (next / scale);
+    ty = cy - (cy - ty) * (next / scale);
+    scale = next; apply();
+  }
+
+  stage.addEventListener("wheel", (e) => {
+    e.preventDefault();
+    zoomAt(Math.exp(-e.deltaY * (e.deltaMode ? 0.05 : 0.0015)), e.clientX, e.clientY);
+  }, { passive: false });
+  stage.addEventListener("dblclick", fit);
+
+  // Pan with one pointer, pinch-zoom with two.
+  const pointers = new Map(); let pinch = null;
+  stage.addEventListener("pointerdown", (e) => {
+    stage.setPointerCapture(e.pointerId);
+    pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    stage.classList.add("panning");
+    if (pointers.size === 2) {
+      const [p, q] = [...pointers.values()];
+      pinch = { d: Math.hypot(p.x - q.x, p.y - q.y) };
+    }
+  });
+  stage.addEventListener("pointermove", (e) => {
+    const prev = pointers.get(e.pointerId); if (!prev) return;
+    const cur = { x: e.clientX, y: e.clientY };
+    pointers.set(e.pointerId, cur);
+    if (pointers.size === 2 && pinch) {
+      const [p, q] = [...pointers.values()];
+      const d = Math.hypot(p.x - q.x, p.y - q.y);
+      zoomAt(d / pinch.d, (p.x + q.x) / 2, (p.y + q.y) / 2); pinch.d = d;
+    } else if (pointers.size === 1) {
+      tx += cur.x - prev.x; ty += cur.y - prev.y; apply();
+    }
+  });
+  const up = (e) => { pointers.delete(e.pointerId); if (pointers.size < 2) pinch = null;
+    if (!pointers.size) stage.classList.remove("panning"); };
+  stage.addEventListener("pointerup", up); stage.addEventListener("pointercancel", up);
+
+  // Divider.
+  let dragging = false;
+  handle.addEventListener("pointerdown", (e) => { dragging = true; handle.setPointerCapture(e.pointerId); e.stopPropagation(); });
+  handle.addEventListener("pointermove", (e) => { if (!dragging) return;
+    split = Math.max(0, Math.min(1, e.clientX / innerWidth)); apply(); });
+  handle.addEventListener("pointerup", () => { dragging = false; });
+  handle.addEventListener("keydown", (e) => {
+    if (e.key === "ArrowLeft") split = Math.max(0, split - 0.02);
+    else if (e.key === "ArrowRight") split = Math.min(1, split + 0.02);
+    else return;
+    e.preventDefault(); apply();
+  });
+
+  // Buttons and keys.
+  $("fit").onclick = fit;
+  $("one").onclick = () => zoomAt(1 / scale, innerWidth / 2, (innerHeight + top()) / 2);
+  $("swap").onclick = () => {
+    swapped = !swapped;
+    const a = L.src; L.src = R.src; R.src = a; labels();
+  };
+  addEventListener("keydown", (e) => {
+    if (e.target.tagName === "SELECT") return;
+    if (e.key === "f" || e.key === "F") fit();
+    else if (e.key === "1") $("one").onclick();
+    else if (e.key === "s" || e.key === "S") $("swap").onclick();
+    else if (e.key === "+" || e.key === "=") zoomAt(1.25, innerWidth / 2, (innerHeight + top()) / 2);
+    else if (e.key === "-") zoomAt(0.8, innerWidth / 2, (innerHeight + top()) / 2);
+  });
+  addEventListener("resize", () => { if (W) apply(); });
+
+  // Start.
+  const want = new URLSearchParams(location.search).get("c");
+  const i = Math.max(0, list.findIndex((c) => c.id === want));
+  pick.value = String(i);
+  open(list[i]);
+})();
+</script>
+</body>
+</html>
