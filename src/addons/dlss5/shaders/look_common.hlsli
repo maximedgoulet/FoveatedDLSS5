@@ -63,9 +63,9 @@ cbuffer LookConstants : register(b0) {
   float GfEps;        // D: guided-filter regularization, stops^2
   uint Padding0;
   // Foveated working grid (foveation.hlsli), dwords 32..35: per-axis packed
-  // warp and host-computed G(1); 0 = uniform axis.
+  // warp and the centre zone's position; 0 = uniform axis.
   uint2 Foveation;
-  float2 FoveationGmax;
+  float2 FoveationCenter;
 };
 
 static const uint kFlagBands = 1u << 0;

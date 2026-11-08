@@ -48,10 +48,10 @@ cbuffer CodecConstants : register(b0) {
   // below).  Only BindCodecV6's resolve dispatch reads it.
   uint TransferMode;
   // Foveated working grid (foveation.hlsli), dwords 24..27: the per-axis
-  // packed warp and its host-computed G(1).  0 = uniform axis; every working
+  // packed warp and the centre zone's position.  0 = uniform axis; every working
   // <-> full mapping below is bit-identical to the uniform one then.
   uint2 Foveation;
-  float2 FoveationGmax;
+  float2 FoveationCenter;
 };
 
 #include "foveation.hlsli"
@@ -246,7 +246,7 @@ float3 DecodeProxyLinear(float3 encoded) {
 // Continuous texel position on a working-resolution surface (P or N) of the
 // full-grid pixel centre `pixel`, warped per axis on a foveated grid.
 float2 WorkPosFromFull(uint2 tex_size, uint2 pixel) {
-  return FovFullToWorkPos(pixel, Size, tex_size, Foveation, FoveationGmax);
+  return FovFullToWorkPos(pixel, Size, tex_size, Foveation, FoveationCenter);
 }
 
 float3 SampleProxyLinearBilinear(uint2 tex_size, uint2 pixel, float2 pos) {

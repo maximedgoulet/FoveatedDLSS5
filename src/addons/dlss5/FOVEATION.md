@@ -42,6 +42,14 @@ effective centre, fall-off, edge density and NR-pixel share at that output.
 | `NRFoveationHeight` | 1800 | centre zone height, output px |
 | `NRFoveationFalloff` | 400 | fall-off length on every side, output px |
 | `NRFoveationEdge` | 0.50 | density beyond the fall-off, per axis (0.25–1.0) |
+| `NRFoveationCenterX` | 50 | zone centre, % of the width (0 left, 100 right) |
+| `NRFoveationCenterY` | 50 | zone centre, % of the height (0 top, 100 bottom) |
+
+Off-centre zones measure distance from the zone's centre c, so each axis has
+two sides of different length; the shaders get c in the per-axis float that
+used to carry G(1) and derive the normalizer G(2c) + G(2 - 2c) themselves.
+c is clamped so the zone stays on screen and snapped to whole pixels; a
+moved centre is a new grid (history reset, working size re-derived).
 
 Use with `NRResolutionScale=1`, `NRFollowInputRes=0` for a 100 % centre.
 

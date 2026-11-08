@@ -9,6 +9,14 @@
 // each frame, so one setting works at any resolution: an axis whose centre
 // covers the whole screen is simply not warped.  Corners get edge x edge.
 //
+// The centre zone can sit anywhere on each axis (Params::center_x/y, e.g.
+// lower for a racing game's dashboard).  Distances are measured from that
+// centre c, so the two sides of an axis have different lengths (2c and
+// 2 - 2c in half-screen units); the working position is
+//   v(n) = (G(2c) + sign(n - c) * G(2|n - c|)) / (G(2c) + G(2 - 2c)),
+// which is the symmetric warp exactly when c = 0.5.  c is clamped so the
+// centre zone never leaves the screen and snapped to whole output pixels.
+//
 // One NR evaluate, one temporal history, no tile seams.
 #pragma once
 
@@ -46,6 +54,11 @@ struct Params {
   uint32_t center_height = 1800;
   uint32_t falloff = 400;  // the same length on all four sides
   float edge = 0.5f;       // density beyond the fall-off, per axis
+  // Where the centre zone sits, 0..1 across the screen (0 = left / top,
+  // 0.5 = middle, 1 = right / bottom).  Clamped per frame so the zone stays
+  // on screen.
+  float center_x = 0.5f;
+  float center_y = 0.5f;
 };
 
 // The exact values the shaders decode from one axis dword.
@@ -56,9 +69,11 @@ struct Decoded {
   double k = 0.0;
 };
 
-// Integral of the density over [0, tau], tau = |2n - 1|.  The fall-off may
-// run past the screen edge (tau = 1): then the edge value is never reached
-// and the ramp is truncated, keeping its physical length at every resolution.
+// Integral of the density over [0, tau], tau = 2|n - c| (distance from the
+// zone's centre in half-screen units; up to 2 when the centre is off the
+// middle).  The fall-off may run past the screen edge: then the edge value is
+// never reached and the ramp is truncated, keeping its physical length at
+// every resolution.
 inline double G(double tau, const Decoded& p) {
   if (tau <= p.a) return tau;
   const double ramp_end = p.a + p.b;
@@ -79,20 +94,31 @@ inline Decoded Decode(uint32_t packed) {
   return p;
 }
 
-// One axis: the packed dword (0 = identity) and the mean density G(1), which
-// is both the working-size factor and the shader's normalizer.
+// G(2c) + G(2 - 2c): the density integral over the whole axis, in
+// half-screen units.  Half of it is the mean density.
+inline double GTotal(double c, const Decoded& p) {
+  return G(2.0 * c, p) + G(2.0 - 2.0 * c, p);
+}
+
+// One axis: the packed dword (0 = identity), the zone's centre c (the float
+// the shaders get beside the dword; they derive their normalizer from it)
+// and the mean density gmax, which sizes the working image.
 struct Axis {
   uint32_t packed = 0;
+  float center = 0.5f;
   float gmax = 1.f;
   // Effective values at this output, for the overlay and the log.
-  uint32_t center_px = 0;   // clamped centre extent
-  uint32_t falloff_px = 0;  // fall-off actually on screen per side
-  float edge_reached = 1.f; // density at the screen edge
+  uint32_t center_px = 0;    // clamped centre extent
+  uint32_t position_px = 0;  // where the zone's middle actually sits
+  uint32_t falloff_px = 0;   // fall-off on screen, on the longer side
+  float edge_reached = 1.f;  // density at the farther screen edge
 };
 
-inline Axis MakeAxis(uint32_t full, uint32_t center, uint32_t falloff, float edge) {
+inline Axis MakeAxis(uint32_t full, uint32_t center, uint32_t falloff, float edge,
+                     float position = 0.5f) {
   Axis axis;
   axis.center_px = std::min(center, full);
+  axis.position_px = full / 2u;
   if (full < 16u || axis.center_px >= full) return axis;
   const uint32_t e_code = static_cast<uint32_t>(
       std::clamp<long>(std::lround(std::clamp(edge, kMinEdge, kMaxEdge) * kEdgeScale),
@@ -107,13 +133,25 @@ inline Axis MakeAxis(uint32_t full, uint32_t center, uint32_t falloff, float edg
       std::clamp<long>(std::lround(ramp_px / half * kRampScale), 0, kRampMax));
   axis.packed = kEnabledBit | a_code | (b_code << 12) | (e_code << 24);
   const Decoded p = Decode(axis.packed);
-  axis.gmax = static_cast<float>(G(1.0, p));
-  const double on_screen = std::clamp(1.0 - p.a, 0.0, p.b);
+  // Safeguards on the position: non-finite means the middle; snap to whole
+  // output pixels (sub-pixel slider jitter must not rebuild the grid and
+  // reset NR's history); then keep the decoded zone [c - a/2, c + a/2] on
+  // screen, which also keeps both sides of the axis non-empty.
+  const double wanted =
+      std::isfinite(position) ? std::clamp<double>(position, 0.0, 1.0) : 0.5;
+  const double snapped = std::round(wanted * full) / full;
+  axis.center = static_cast<float>(std::clamp(snapped, 0.5 * p.a, 1.0 - 0.5 * p.a));
+  const double c = axis.center;  // exactly what the shaders get
+  axis.position_px = static_cast<uint32_t>(std::lround(c * full));
+  axis.gmax = static_cast<float>(0.5 * GTotal(c, p));
+  // Overlay numbers for the longer side (the one that reaches lowest).
+  const double side = 2.0 * std::max(c, 1.0 - c);
+  const double on_screen = std::clamp(side - p.a, 0.0, p.b);
   axis.falloff_px = static_cast<uint32_t>(std::lround(on_screen * half));
-  if (p.b <= 0.0 || 1.0 >= p.a + p.b) {
+  if (p.b <= 0.0 || side >= p.a + p.b) {
     axis.edge_reached = static_cast<float>(p.e);
   } else {
-    const double q = (1.0 - p.a) / p.b;
+    const double q = (side - p.a) / p.b;
     axis.edge_reached = static_cast<float>(1.0 - p.k * q * q * (3.0 - 2.0 * q));
   }
   return axis;
@@ -125,8 +163,11 @@ struct Grid {
   bool active() const { return x.packed != 0u || y.packed != 0u; }
   // NR pixels over the uniform grid's.
   double PixelFactor() const { return static_cast<double>(x.gmax) * y.gmax; }
+  // The centres are part of the mapping: a moved zone is a new grid (new
+  // working size, reset NR history), never a stale warp.
   bool operator==(const Grid& o) const {
-    return x.packed == o.x.packed && y.packed == o.y.packed;
+    return x.packed == o.x.packed && y.packed == o.y.packed
+        && x.center == o.x.center && y.center == o.y.center;
   }
   bool operator!=(const Grid& o) const { return !(*this == o); }
 };
@@ -142,8 +183,10 @@ inline Grid MakeGrid(bool enabled, const Params& params, uint32_t full_width,
   if (!enabled) {
     reason = Inactive::kOff;
   } else {
-    grid.x = MakeAxis(full_width, params.center_width, params.falloff, params.edge);
-    grid.y = MakeAxis(full_height, params.center_height, params.falloff, params.edge);
+    grid.x = MakeAxis(full_width, params.center_width, params.falloff, params.edge,
+                      params.center_x);
+    grid.y = MakeAxis(full_height, params.center_height, params.falloff, params.edge,
+                      params.center_y);
     if (!grid.active()) {
       reason = Inactive::kCentreCoversScreen;
     } else if (grid.PixelFactor() > 1.0 - kMinSaving) {
@@ -152,8 +195,10 @@ inline Grid MakeGrid(bool enabled, const Params& params, uint32_t full_width,
     if (reason != Inactive::kNone) {
       // Keep the effective numbers for the overlay, drop the warp.
       grid.x.packed = 0u;
+      grid.x.center = 0.5f;
       grid.x.gmax = 1.f;
       grid.y.packed = 0u;
+      grid.y.center = 0.5f;
       grid.y.gmax = 1.f;
     }
   }
@@ -174,9 +219,10 @@ inline uint32_t WarpedExtent(uint32_t uniform, const Axis& axis) {
 inline double Warp(double n, const Axis& axis) {
   if (axis.packed == 0u) return n;
   const Decoded p = Decode(axis.packed);
-  const double t = 2.0 * n - 1.0;
+  const double c = axis.center;
+  const double t = n - c;
   const double s = t < 0.0 ? -1.0 : (t > 0.0 ? 1.0 : 0.0);
-  return 0.5 + 0.5 * s * G(std::abs(t), p) / axis.gmax;
+  return (G(2.0 * c, p) + s * G(2.0 * std::abs(t), p)) / GTotal(c, p);
 }
 
 }  // namespace foveation

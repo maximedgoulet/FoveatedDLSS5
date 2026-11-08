@@ -1362,6 +1362,10 @@ inline constexpr uint32_t kFoveationWidth = 3000;
 inline constexpr uint32_t kFoveationHeight = 1800;
 inline constexpr uint32_t kFoveationFalloff = 400;
 inline constexpr float kFoveationEdge = 0.5f;
+// Where the centre zone sits, in percent of the screen (50 = middle; Y: 0 top,
+// 100 bottom).  A racing game might use Y 60-65 to cover the dashboard.
+inline constexpr float kFoveationCenterX = 50.f;
+inline constexpr float kFoveationCenterY = 50.f;
 // Config/overlay bounds for the pixel settings (the output clamps further).
 inline constexpr uint32_t kFoveationMaxPixels = 16384;
 inline constexpr uint32_t kToggleHotkey = VK_F6;
@@ -1546,6 +1550,8 @@ inline std::atomic_uint32_t nr_foveation_width = defaults::kFoveationWidth;
 inline std::atomic_uint32_t nr_foveation_height = defaults::kFoveationHeight;
 inline std::atomic_uint32_t nr_foveation_falloff = defaults::kFoveationFalloff;
 inline std::atomic<float> nr_foveation_edge = defaults::kFoveationEdge;
+inline std::atomic<float> nr_foveation_center_x = defaults::kFoveationCenterX;
+inline std::atomic<float> nr_foveation_center_y = defaults::kFoveationCenterY;
 
 // The grid for an output of width x height (uniform when off, when the
 // centre covers the screen, or when it would save under 5% of the NR
@@ -1558,7 +1564,9 @@ inline foveation::Grid CurrentFoveation(
       {.center_width = nr_foveation_width.load(),
        .center_height = nr_foveation_height.load(),
        .falloff = nr_foveation_falloff.load(),
-       .edge = nr_foveation_edge.load()},
+       .edge = nr_foveation_edge.load(),
+       .center_x = nr_foveation_center_x.load() / 100.f,
+       .center_y = nr_foveation_center_y.load() / 100.f},
       width, height, why);
 }
 // An overlay resolution commit arms this so the next evaluation applies the
@@ -3716,7 +3724,7 @@ inline bool CreateRootSignature(
 inline constexpr uint32_t kCodecRootConstants = 28;
 // Dword index of Foveation in every codec cbuffer view.
 // First dword of the foveated grid in every codec view: packed X, packed Y,
-// G(1) X, G(1) Y (foveation.hlsli).
+// centre X, centre Y (foveation.hlsli).
 inline constexpr uint32_t kCodecFoveationDword = 24;
 
 inline bool EnsureCodecRootSignature(ID3D12Device* device) {
@@ -5782,7 +5790,7 @@ inline void BindCodec(
     // the codec-mode flag below (the v6 map is V6CodecConstants).
     float padding[9];
     uint32_t foveation[2];      // dwords 24..25, foveation.hlsli
-    float foveation_gmax[2];    // dwords 26..27
+    float foveation_center[2];  // dwords 26..27
   } constants{
       width,
       height,
@@ -5802,7 +5810,7 @@ inline void BindCodec(
       {codec_mode.load() != 0 ? 1.f : 0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f,
        0.f},
       {resources.foveation.x.packed, resources.foveation.y.packed},
-      {resources.foveation.x.gmax, resources.foveation.y.gmax}};
+      {resources.foveation.x.center, resources.foveation.y.center}};
   static_assert(
       sizeof(constants) == kCodecRootConstants * sizeof(uint32_t),
       "the legacy view fills the codec root signature's constant block");
@@ -5844,9 +5852,9 @@ struct V6CodecConstants {
   uint32_t governor_mode;
   uint32_t transfer_mode;
   // Foveated working grid (foveation.hlsli): packed X/Y (0 = uniform axis)
-  // and the host-computed G(1) per axis.
+  // and the centre zone's position per axis.
   uint32_t foveation[2];
-  float foveation_gmax[2];
+  float foveation_center[2];
 };
 static_assert(
     sizeof(V6CodecConstants) == kCodecRootConstants * sizeof(uint32_t),
@@ -5925,7 +5933,7 @@ inline void BindCodecV6(
       0u,
       transfer_mode.load(std::memory_order_relaxed),
       {resources.foveation.x.packed, resources.foveation.y.packed},
-      {resources.foveation.x.gmax, resources.foveation.y.gmax}};
+      {resources.foveation.x.center, resources.foveation.y.center}};
   command_list->SetComputeRoot32BitConstants(2, kCodecRootConstants, &constants, 0);
 }
 
@@ -6416,7 +6424,7 @@ struct FovGuideConstants {
   uint32_t flags;
   uint32_t reserved[11];
   uint32_t foveation[2];
-  float foveation_gmax[2];
+  float foveation_center[2];
 };
 static_assert(sizeof(FovGuideConstants) == kCodecRootConstants * sizeof(uint32_t),
               "fov_guides fills the codec root signature's constant block");
@@ -6473,8 +6481,8 @@ inline bool RecordFoveatedGuides(
   constants.flags = 3u;  // depth and motion bound
   constants.foveation[0] = res.foveation.x.packed;
   constants.foveation[1] = res.foveation.y.packed;
-  constants.foveation_gmax[0] = res.foveation.x.gmax;
-  constants.foveation_gmax[1] = res.foveation.y.gmax;
+  constants.foveation_center[0] = res.foveation.x.center;
+  constants.foveation_center[1] = res.foveation.y.center;
 
   submission::TrackUse(command_list, frame.depth);
   submission::TrackUse(command_list, frame.motion);
@@ -6514,7 +6522,8 @@ inline bool RecordFoveatedGuides(
     std::ostringstream message;
     message << "foveated NR active: working " << res.input_width << 'x' << res.input_height
             << " for output " << res.width << 'x' << res.height << " (centre "
-            << g.x.center_px << 'x' << g.y.center_px << ", fall-off on screen "
+            << g.x.center_px << 'x' << g.y.center_px << " at " << g.x.position_px << ','
+            << g.y.position_px << ", fall-off on screen "
             << g.x.falloff_px << '/' << g.y.falloff_px << " px, edge density "
             << g.x.edge_reached << '/' << g.y.edge_reached << ", "
             << static_cast<int>(std::lround(g.PixelFactor() * 100.0)) << "% of the NR pixels)";
@@ -6645,7 +6654,7 @@ inline LookRoute RunLookStage(
       .reference_linear = res.hdr_mode != 0,
       .transport = transport,
       .foveation = {res.foveation.x.packed, res.foveation.y.packed},
-      .foveation_gmax = {res.foveation.x.gmax, res.foveation.y.gmax},
+      .foveation_center = {res.foveation.x.center, res.foveation.y.center},
   };
 
   if ((live & kLookSurfaceTrace) != 0) {
@@ -14752,7 +14761,8 @@ inline void EmitTelemetry(int64_t now_ns, bool force = false) {
              << " resolution_scale=" << nr_resolution_scale.load()
              << " foveation=" << nr_foveation.load() << ':' << nr_foveation_width.load()
              << 'x' << nr_foveation_height.load() << '/' << nr_foveation_falloff.load()
-             << '/' << nr_foveation_edge.load()
+             << '/' << nr_foveation_edge.load() << '@' << nr_foveation_center_x.load()
+             << ',' << nr_foveation_center_y.load()
              << " follow_input=" << nr_follow_input_res.load()
              << " look=" << look_mode.load() << " stabilize=" << look_stabilize.load()
              << " upsample=" << look_upsample.load() << " codec=" << codec_mode.load()
@@ -15308,6 +15318,12 @@ inline constexpr Setting kSetFoveationFalloff{
     SettingEffect::kNone};
 inline constexpr Setting kSetFoveationEdge{
     "NRFoveationEdge", &nr_foveation_edge, defaults::kFoveationEdge, SettingEffect::kNone};
+inline constexpr Setting kSetFoveationCenterX{
+    "NRFoveationCenterX", &nr_foveation_center_x, defaults::kFoveationCenterX,
+    SettingEffect::kNone};
+inline constexpr Setting kSetFoveationCenterY{
+    "NRFoveationCenterY", &nr_foveation_center_y, defaults::kFoveationCenterY,
+    SettingEffect::kNone};
 
 // Lowering the pass count must free the retired passes' NR feature handles;
 // raising it starts the new passes from clean temporal state.  The per-pass
@@ -15576,7 +15592,8 @@ inline constexpr const Setting* kLookResultSettings[] = {
 inline constexpr const Setting* kPerformanceSettings[] = {
     &kSetPreSr,           &kSetFollowInputRes, &kSetResolutionScale,
     &kSetFoveation,       &kSetFoveationWidth, &kSetFoveationHeight,
-    &kSetFoveationFalloff, &kSetFoveationEdge, &kSetLookUpsample};
+    &kSetFoveationFalloff, &kSetFoveationEdge, &kSetFoveationCenterX,
+    &kSetFoveationCenterY, &kSetLookUpsample};
 inline constexpr const Setting* kStackingSettings[] = {
     &kSetStackPasses,     &kSetPassIntensity[0], &kSetPassIntensity[1],
     &kSetPassIntensity[2], &kSetPassTransfer[0], &kSetPassTransfer[1],
@@ -16331,6 +16348,16 @@ inline void DrawSectionStackingResolution(const ui::PanelText& text) {
           "Height of the full-resolution centre zone, in screen pixels.  At the"
           " full screen height only the sides are lowered.");
       SliderSetting(
+          text, kSetFoveationCenterY, "Centre vertical position", 0.f, 100.f, "%.0f%%",
+          "Where the centre zone sits vertically: 0% top, 50% middle, 100% bottom."
+          "  Lower it to keep a dashboard or cockpit sharp and give the sky less."
+          "  The zone always stays on screen: a position past the edge is held at"
+          " the edge (see the readout below).");
+      SliderSetting(
+          text, kSetFoveationCenterX, "Centre horizontal position", 0.f, 100.f, "%.0f%%",
+          "Where the centre zone sits horizontally: 0% left, 50% middle, 100% right."
+          "  The zone always stays on screen.");
+      SliderSetting(
           text, kSetFoveationFalloff, "Fall-off", 0.f, max_falloff, "%.0f px",
           "Distance over which the resolution blends from the centre to the"
           " edge value, on every side.  0 is a hard step.  Longer than the"
@@ -16346,18 +16373,20 @@ inline void DrawSectionStackingResolution(const ui::PanelText& text) {
         const foveation::Grid grid = CurrentFoveation(out_w, out_h, &why);
         const foveation::Axis ax = foveation::MakeAxis(
             out_w, nr_foveation_width.load(), nr_foveation_falloff.load(),
-            nr_foveation_edge.load());
+            nr_foveation_edge.load(), nr_foveation_center_x.load() / 100.f);
         const foveation::Axis ay = foveation::MakeAxis(
             out_h, nr_foveation_height.load(), nr_foveation_falloff.load(),
-            nr_foveation_edge.load());
-        char effective[160];
+            nr_foveation_edge.load(), nr_foveation_center_y.load() / 100.f);
+        char effective[224];
         if (why == foveation::Inactive::kNone) {
+          // The position shown is the clamped one: what the frame really uses.
           std::snprintf(
               effective, sizeof(effective),
-              "%ux%u: centre %ux%u, fall-off %u/%u px, edges %.2f/%.2f, %.0f%% of the"
-              " NR pixels",
-              out_w, out_h, ax.center_px, ay.center_px, ax.falloff_px, ay.falloff_px,
-              ax.edge_reached, ay.edge_reached, grid.PixelFactor() * 100.0);
+              "%ux%u: centre %ux%u at %.0f%%/%.0f%%, fall-off %u/%u px, edges"
+              " %.2f/%.2f, %.0f%% of the NR pixels",
+              out_w, out_h, ax.center_px, ay.center_px, ax.center * 100.0,
+              ay.center * 100.0, ax.falloff_px, ay.falloff_px, ax.edge_reached,
+              ay.edge_reached, grid.PixelFactor() * 100.0);
         } else {
           std::snprintf(
               effective, sizeof(effective), "%ux%u: inactive (%s)", out_w, out_h,
@@ -17187,6 +17216,8 @@ inline std::string BuildSupportReport() {
          << " NRFoveationHeight=" << nr_foveation_height.load()
          << " NRFoveationFalloff=" << nr_foveation_falloff.load()
          << " NRFoveationEdge=" << nr_foveation_edge.load()
+         << " NRFoveationCenterX=" << nr_foveation_center_x.load()
+         << " NRFoveationCenterY=" << nr_foveation_center_y.load()
          << " EnableHooks="
          << (!hooks_enabled.load() ? 0 : streamline_hooks_enabled.load() ? 1 : 2)
          << " DX11Source="
@@ -18422,11 +18453,15 @@ inline void LoadConfiguration() {
     uint32_t saved_height = defaults::kFoveationHeight;
     uint32_t saved_falloff = defaults::kFoveationFalloff;
     float saved_edge = defaults::kFoveationEdge;
+    float saved_center_x = defaults::kFoveationCenterX;
+    float saved_center_y = defaults::kFoveationCenterY;
     reshade::get_config_value(nullptr, kConfigSection, "NRFoveation", saved_foveation);
     reshade::get_config_value(nullptr, kConfigSection, "NRFoveationWidth", saved_width);
     reshade::get_config_value(nullptr, kConfigSection, "NRFoveationHeight", saved_height);
     reshade::get_config_value(nullptr, kConfigSection, "NRFoveationFalloff", saved_falloff);
     reshade::get_config_value(nullptr, kConfigSection, "NRFoveationEdge", saved_edge);
+    reshade::get_config_value(nullptr, kConfigSection, "NRFoveationCenterX", saved_center_x);
+    reshade::get_config_value(nullptr, kConfigSection, "NRFoveationCenterY", saved_center_y);
     nr_foveation = saved_foveation;
     // Pixel values are only bounded here; the output resolution clamps them
     // every frame (foveation::MakeAxis), so one setting serves any display.
@@ -18442,6 +18477,12 @@ inline void LoadConfiguration() {
     nr_foveation_edge = SanitizeFloatKey(
         saved_edge, defaults::kFoveationEdge, foveation::kMinEdge, foveation::kMaxEdge,
         "NRFoveationEdge");
+    // Percent of the screen; NaN/Inf falls back to the middle.  MakeAxis
+    // clamps again per frame so the zone stays on screen.
+    nr_foveation_center_x = SanitizeFloatKey(
+        saved_center_x, defaults::kFoveationCenterX, 0.f, 100.f, "NRFoveationCenterX");
+    nr_foveation_center_y = SanitizeFloatKey(
+        saved_center_y, defaults::kFoveationCenterY, 0.f, 100.f, "NRFoveationCenterY");
   }
   gpu_timers_enabled = saved_gpu_timers;
   edit_trace_enabled = saved_edit_trace;

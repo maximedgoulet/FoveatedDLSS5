@@ -12,7 +12,7 @@ void main(uint3 dispatch_id : SV_DispatchThreadID) {
   [branch] if (FovAny(Foveation)) {
     // Foveated grid: toward the borders a working texel covers a larger
     // full-frame span; keep the area filter exact over it.
-    FovWorkFootprint(pixel, Size, source_size, Foveation, FoveationGmax,
+    FovWorkFootprint(pixel, Size, source_size, Foveation, FoveationCenter,
                      footprint_min, footprint_max);
   }
   const int2 first = int2(floor(footprint_min));

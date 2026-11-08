@@ -38,7 +38,7 @@ cbuffer FovGuideConstants : register(b0) {
   uint4 Reserved3;
   uint4 Reserved4;
   uint2 Foveation;
-  float2 FoveationGmax;
+  float2 FoveationCenter;
 };
 
 static const uint kFlagDepth = 1u;
@@ -50,7 +50,7 @@ void main(uint3 dispatch_id : SV_DispatchThreadID) {
   if (any(pixel >= Size)) return;
 
   // Normalized full-frame position of this working texel's centre.
-  const float2 n = FovUnwarp((float2(pixel) + 0.5) / float2(Size), Foveation, FoveationGmax);
+  const float2 n = FovUnwarp((float2(pixel) + 0.5) / float2(Size), Foveation, FoveationCenter);
 
   if ((Flags & kFlagDepth) != 0u) {
     // Nearest, never filtered: blending depth across a silhouette invents a
@@ -71,7 +71,7 @@ void main(uint3 dispatch_id : SV_DispatchThreadID) {
     // The current position's warp is the texel centre by construction.
     const float2 d = mv / float2(grid);
     const float2 v_now = (float2(pixel) + 0.5) / float2(Size);
-    const float2 v_prev = FovWarp(n + d, Foveation, FoveationGmax);
+    const float2 v_prev = FovWarp(n + d, Foveation, FoveationCenter);
     warped = (v_prev - v_now) * float2(Size);
   }
   WarpedMotion[pixel] = warped;

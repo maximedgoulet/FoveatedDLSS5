@@ -102,10 +102,10 @@ struct Constants {
   float gf_eps;
   uint32_t padding0;
   // Foveated working grid (foveation.hlsli), dwords 32..35: packed X/Y
-  // (0 = uniform axis) and the host-computed G(1) per axis.  HLSL keeps the
+  // (0 = uniform axis) and the centre zone's position per axis.  HLSL keeps the
   // uint2 on a 16-byte register, hence padding0.
   uint32_t foveation[2];
-  float foveation_gmax[2];
+  float foveation_center[2];
 };
 static_assert(
     sizeof(Constants) == 36 * sizeof(uint32_t),
@@ -177,10 +177,10 @@ struct Frame {
   uint32_t motion_base[2] = {0, 0};
   uint32_t motion_grid[2] = {1, 1};
   // Foveated working grid (foveation.hpp): packed X/Y, 0 = uniform axis, and
-  // G(1) per axis.  Kept last so the designated initializers that build a
-  // Frame stay in member order.
+  // the centre zone's position per axis.  Kept last so the designated
+  // initializers that build a Frame stay in member order.
   uint32_t foveation[2] = {0, 0};
-  float foveation_gmax[2] = {1.f, 1.f};
+  float foveation_center[2] = {0.5f, 0.5f};
 };
 
 inline uint32_t BandRadius(const Settings& s, uint32_t nr_height) {
@@ -231,8 +231,8 @@ inline Constants MakeConstants(const Settings& s, const Frame& f) {
   c.gf_eps = 0.01f;
   c.foveation[0] = f.foveation[0];
   c.foveation[1] = f.foveation[1];
-  c.foveation_gmax[0] = f.foveation_gmax[0];
-  c.foveation_gmax[1] = f.foveation_gmax[1];
+  c.foveation_center[0] = f.foveation_center[0];
+  c.foveation_center[1] = f.foveation_center[1];
   return c;
 }
 

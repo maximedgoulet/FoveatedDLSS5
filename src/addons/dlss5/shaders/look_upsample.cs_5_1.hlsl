@@ -41,7 +41,7 @@ void main(uint3 dispatch_id : SV_DispatchThreadID) {
   const int2 last = int2(NrSize) - 1;
   float2 position = (float2(pixel) + 0.5) * float2(NrSize) / float2(Size) - 0.5;
   [branch] if (FovAny(Foveation)) {
-    position = FovFullToWorkPos(uint2(pixel), Size, NrSize, Foveation, FoveationGmax);
+    position = FovFullToWorkPos(uint2(pixel), Size, NrSize, Foveation, FoveationCenter);
   }
   const int2 base = int2(floor(position));
   const bool linear_reference = (Flags & kFlagRefLinear) != 0u;

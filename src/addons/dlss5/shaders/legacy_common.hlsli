@@ -28,7 +28,7 @@ cbuffer CodecConstants : register(b0) {
   // 24..27 in every codec view.  0 = uniform axis.
   float4 Padding2;
   uint2 Foveation;
-  float2 FoveationGmax;
+  float2 FoveationCenter;
 };
 
 #include "codec_math.hlsli"
@@ -150,7 +150,7 @@ float3 ResolvePixel(uint2 pixel, float3 source) {
       proxy_size - 1);
   [branch] if (FovAny(Foveation)) {
     proxy_pixel = min(
-        uint2(max(FovFullToWorkPos(pixel, Size, proxy_size, Foveation, FoveationGmax) + 0.5,
+        uint2(max(FovFullToWorkPos(pixel, Size, proxy_size, Foveation, FoveationCenter) + 0.5,
                   0.0)),
         proxy_size - 1u);
   }
@@ -163,7 +163,7 @@ float3 ResolvePixel(uint2 pixel, float3 source) {
       neural_size - 1);
   [branch] if (FovAny(Foveation)) {
     neural_pixel = min(
-        uint2(max(FovFullToWorkPos(pixel, Size, neural_size, Foveation, FoveationGmax) + 0.5,
+        uint2(max(FovFullToWorkPos(pixel, Size, neural_size, Foveation, FoveationCenter) + 0.5,
                   0.0)),
         neural_size - 1u);
   }

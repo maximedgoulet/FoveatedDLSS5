@@ -51,8 +51,10 @@ Open the ReShade overlay → **Add-ons** → **DLSS 5 Neural Rendering**. The fo
 | Overlay | `ReShade.ini` key | Default | What it does |
 |---|---|---|---|
 | Foveated resolution | `NRFoveation` | `0` | `1` turns foveation on. Greyed out when NR runs before upscaling (see below). |
-| Centre width | `NRFoveationWidth` | `3000` | Width of the full-resolution zone, in **screen pixels**, centred horizontally. |
-| Centre height | `NRFoveationHeight` | `1800` | Height of the full-resolution zone, in screen pixels, centred vertically. Set it to your screen height or more to lower only the sides. |
+| Centre width | `NRFoveationWidth` | `3000` | Width of the full-resolution zone, in **screen pixels**. |
+| Centre height | `NRFoveationHeight` | `1800` | Height of the full-resolution zone, in screen pixels. Set it to your screen height or more to lower only the sides. |
+| Centre vertical position | `NRFoveationCenterY` | `50` | Where the zone sits vertically, in % of the screen: `0` top, `50` middle, `100` bottom. Lower it to keep a dashboard or cockpit sharp and spend less on the sky. |
+| Centre horizontal position | `NRFoveationCenterX` | `50` | Where the zone sits horizontally: `0` left, `50` middle, `100` right. |
 | Fall-off | `NRFoveationFalloff` | `400` | Distance in screen pixels over which resolution blends from 100 % down to the edge value. The same on all four sides. `0` is a hard step. |
 | Edge resolution | `NRFoveationEdge` | `0.50` | Resolution beyond the fall-off, relative to the centre, per direction. `0.50` = half. Range 0.25–1.00. |
 
@@ -61,6 +63,7 @@ Below the sliders, a **readout** shows what you actually get at the current reso
 **Sizes are in screen pixels, so one setting works on any display.** Each frame, the add-on checks them against the real output:
 
 - **Centre bigger than the screen** in one direction: that direction isn't lowered at all.
+- **Zone pushed past an edge** by the position sliders: it stops flush with that edge and never leaves the screen. The readout shows the position actually used. Positions snap to whole pixels, and a value outside 0–100 in `ReShade.ini` is clamped (a broken value falls back to 50).
 - **Fall-off longer than the space left** to the screen edge: the blend keeps its length and is cut off by the edge, so the edge value isn't reached. The readout shows the value that is.
 - **Saving under 5 %:** foveation switches itself off for that resolution. The extra squeeze pass would cost more than it saves, and the readout says "inactive".
 - **Your stored values are never overwritten.** Settings made for a larger display come back when you return to it.
@@ -86,7 +89,11 @@ NRFoveationWidth=3000
 NRFoveationHeight=1800
 NRFoveationFalloff=400
 NRFoveationEdge=0.5
+NRFoveationCenterX=50
+NRFoveationCenterY=50
 ```
+
+**Racing / cockpit games:** a shorter, lower zone keeps the dashboard and road sharp and gives the sky less. On a 7680×2160 panel, `NRFoveationHeight=1100` with `NRFoveationCenterY=62` covers rows 789–1889 and runs NR on about 61 % of the pixels (71 % with the defaults).
 
 ## Estimating the saving
 
