@@ -88,9 +88,14 @@ sizes are static_asserted in `dlssnr.hpp` and `look_stage.hpp`.
   zone preview). v0.3.0 had pixel-based settings; those keys are no longer read.
   Measured 2026-11-08 (2 NR passes, 7680x2160): Forza Horizon 15 -> 25 fps (v0.4),
   The Witcher 3 49 -> 81 fps (v0.1). README section "Measured in games".
-- `feat/half-rate`: half-rate NR (NR every other frame, reprojected through motion
-  vectors, disarmed for a debounce of frames when motion is fast). CI green, not
-  tested in game. Will need a rebase on the percent-zones settings.
+- `feat/half-rate`: **canned by the owner (2026-11-08), do not merge.** Half-rate NR
+  (NR every other frame, reprojected through motion vectors, motion-gated, any stack
+  count) worked in Forza Horizon, but the frame pacing swinging between high and low
+  frame rates as the gate arms and disarms was unpleasant to watch. Kept as an archive.
+  Its motion readback ring (`half_rate.hpp`) and the "say why it is off, one-click fix"
+  readout pattern are worth reusing. Don't propose alternating-frame schemes again
+  without solving pacing.
+- Owner's direction after that test: favour image quality over further speed tricks.
 - Not started: auto-trim (sky by depth with a bottom-up horizon scan, plus too-dark and
   too-bright bands turned off; optional, default off, at most ~10 % of NR's cost; reuse
-  `half_rate.hpp`'s readback ring and `Params::limit_*`).
+  `half_rate.hpp`'s readback ring from `feat/half-rate` and `Params::limit_*`).
