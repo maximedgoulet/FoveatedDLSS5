@@ -81,7 +81,15 @@ struct Storage {
   Storage& operator=(const Storage&) = delete;
 };
 
-inline thread_local Storage storage;
+// Function-local rather than `inline thread_local Storage storage;`: an inline
+// TLS variable with a non-trivial destructor makes clang emit an associative
+// COMDAT that lld-link (seen with LLVM 23.1.3) crashes on: "Associative
+// COMDAT symbol '...capture_arena...storage...' does not exist".  MSVC
+// accepted both forms.
+inline Storage& LocalStorage() noexcept {
+  thread_local Storage storage;
+  return storage;
+}
 
 }  // namespace capture_arena
 
@@ -89,7 +97,7 @@ inline thread_local Storage storage;
 // exhausted, and the caller treats that as "no capture" - which declines the
 // evaluate rather than injecting without a restore target.
 inline CapturedComputeState* AcquireCaptureSlot() noexcept {
-  capture_arena::Storage& arena = capture_arena::storage;
+  capture_arena::Storage& arena = capture_arena::LocalStorage();
   if (arena.slots == nullptr) {
     arena.slots =
         new (std::nothrow) CapturedComputeState[kCaptureArenaSlots];
@@ -119,7 +127,7 @@ inline CapturedComputeState* AcquireCaptureSlot() noexcept {
 
 inline void ReleaseCaptureSlot(CapturedComputeState* slot) noexcept {
   if (slot == nullptr) return;
-  capture_arena::Storage& arena = capture_arena::storage;
+  capture_arena::Storage& arena = capture_arena::LocalStorage();
   const bool pooled = arena.slots != nullptr && slot >= arena.slots
       && slot < arena.slots + kCaptureArenaSlots;
   if (!pooled) {
