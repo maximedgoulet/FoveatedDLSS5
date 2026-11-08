@@ -6,7 +6,7 @@
 
 FoveatedDLSS5 is the open-source RenoDX DLSS 5 add-on (`renodx-dlss5`, RenoDX-DLSS5-Generic v7.5.0-rc5) with **dual foveation** built in. Everything else in the add-on works exactly as before, and with foveation off it *is* the stock add-on.
 
-> **Status: pre-release.** v0.1 was tested in The Witcher 3 (DX12, 7680×2160, RTX 4090). The movable centre (v0.2) and dual foveation (v0.3) are new and not yet tested in a game. Field reports are very welcome.
+> **Status: pre-release.** v0.1 was tested in The Witcher 3 (DX12, 7680×2160, RTX 4090). The movable zones and dual foveation (v0.3) are new and not yet tested in a game. Field reports are very welcome.
 
 ---
 
@@ -40,7 +40,7 @@ How much of a full-screen NR pass is left (NR pixels, centre at native resolutio
 | Preset | 16:9 (3840×2160) | 21:9 (3440×1440) | 32:9 (5120×1440) | 32:9 (7680×2160) |
 |---|---|---|---|---|
 | Stock add-on | 100 % | 100 % | 100 % | 100 % |
-| Classic foveation (v0.2 defaults) | 93 % (1.1×) | 82 % (1.2×) | 71 % (1.4×) | 71 % (1.4×) |
+| Classic foveation (v0.1 defaults) | 93 % (1.1×) | 82 % (1.2×) | 71 % (1.4×) | 71 % (1.4×) |
 | **Balanced** | 71 % (1.4×) | 60 % (1.7×) | 40 % (2.5×) | 40 % (2.5×) |
 | **Racing** | 51 % (2.0×) | 39 % (2.5×) | 26 % (3.8×) | 26 % (3.8×) |
 | **Aggressive** | 34 % (2.9×) | 26 % (3.9×) | 17 % (5.8×) | 17 % (5.8×) |
@@ -141,7 +141,7 @@ ReShade overlay → **Add-ons** → **DLSS 5 Neural Rendering**. The foveation c
 | Centre horizontal position | `NRFoveationCenterX` | `50` | `0` left, `50` middle, `100` right. |
 | Fall-off | `NRFoveationFalloff` | `400` | Distance in screen pixels over which resolution blends from the centre to the midpoint value. `0` is a hard step. |
 | Midpoint resolution | `NRFoveationEdge` | `0.50` | Resolution of the midpoint zone relative to the centre, per direction. Range 0.25–1.00. |
-| Midpoint zone width / height | `NRFoveationMidWidth` / `NRFoveationMidHeight` | `16384` | Size of the midpoint zone, centred on the same position. **Beyond it NR is off.** The screen size or more = NR everywhere (the classic v0.2 behaviour, and the default). |
+| Midpoint zone width / height | `NRFoveationMidWidth` / `NRFoveationMidHeight` | `16384` | Size of the midpoint zone, centred on the same position. **Beyond it NR is off.** The screen size or more = NR everywhere (the classic v0.1 behaviour, and the default). |
 | Off-zone blend | `NRFoveationBlend` | `96` | How far inside the midpoint zone NR fades in, so the border to the game's own image is soft. |
 
 The **readout** under the sliders shows what you actually get: the effective zones in pixels, the fall-off that fits, the midpoint value reached, and the share of NR pixels left. Tune with it open.
