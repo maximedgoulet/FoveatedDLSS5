@@ -5,9 +5,16 @@
 #   artifact.
 # - Push a tag v* (e.g. v0.1.0), or Run workflow with "release" set to a new
 #   tag name: builds, then publishes a GitHub release (creating the tag on the
-#   built commit when needed) with the add-on and its SHA-256 attached. Tags with a suffix (v0.2.0-beta) and
-#   all 0.x versions are marked pre-release. Release notes come from
-#   .github/release-notes/<tag>.md when that file exists.
+#   built commit when needed) with the add-on and its SHA-256 attached. Tags
+#   with a suffix (v0.2.0-beta) and all 0.x versions are marked pre-release.
+#   Release notes come from .github/release-notes/<tag>.md when that file
+#   exists.
+# - Push to main (code changes): builds the artifact, and the clang job checks
+#   that the add-on also compiles and links with the latest Clang/lld-link.
+#
+# This is the repo's only workflow: upstream RenoDX's whole-tree workflows
+# (nightly, snapshot, Clang/Ninja/VS x64/x86, auto-merge) were removed because
+# they build every game mod and publish upstream-style releases.
 name: Build DLSS5 add-on
 
 on:
@@ -18,12 +25,54 @@ on:
         required: false
         default: ""
   push:
+    branches: [main]
     tags: ["v*"]
+    paths-ignore:
+      - "**/*.md"
+      - "docs/**"
 
 permissions:
   contents: write
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref == 'refs/heads/main' }}
+
 jobs:
+  # Same toolchain as upstream's nightly (latest Clang + lld-link), dlss5 only.
+  # It caught an lld-link crash that the MSVC build does not see.
+  clang:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up shader tools
+        shell: pwsh
+        run: .\scripts\setup-dev-env.ps1 -Update -Tools dxc,slang,glslang
+
+      - name: Set up Clang
+        uses: egor-tensin/setup-clang@v1
+        with:
+          version: latest
+          platform: x64
+
+      - name: Install ninja-build tool
+        uses: seanmiddleditch/gha-setup-ninja@v5
+
+      - name: MSVC environment
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: amd64
+
+      - name: Configure
+        run: cmake --preset clang-x64
+
+      - name: Build dlss5 (Clang)
+        run: cmake --build --preset clang-x64-release --target dlss5 --verbose
+
+
   build:
     runs-on: windows-2022
     steps:
