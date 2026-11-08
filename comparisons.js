@@ -2,6 +2,20 @@
 // files go in images/. The first entry opens by default; ?c=<id> opens another.
 window.COMPARISONS = [
   {
+    id: "fuji",
+    title: "Forza Horizon, Mount Fuji (v0.4): foveation off vs on, 7680×2160",
+    left: { src: "images/fuji-foveation-off.webp", label: "Foveation off · 18 fps" },
+    right: { src: "images/fuji-foveation-on.webp", label: "Foveation on · 29 fps" },
+    note: "DLSS 5 NR, 2 passes, resolution 86 % · centre 41×57 %, contour 25×30 % at 0.50, vertical 65 % · NR on 43 % of the pixels (2.3×) · overlay open with the zones drawn · rendered FPS (frame generation doubles the counter)",
+  },
+  {
+    id: "fuji-nr",
+    title: "Forza Horizon, Mount Fuji: game image vs foveated DLSS 5 NR, 7680×2160",
+    left: { src: "images/fuji-nr-off.webp", label: "NR off · 55 fps" },
+    right: { src: "images/fuji-foveated-clean.webp", label: "Foveated NR · 29 fps" },
+    note: "Same spot and layout as above, overlay closed · the weather changed between the two shots (rain on the left) · rendered FPS",
+  },
+  {
     id: "forza",
     title: "Forza Horizon (v0.4): foveation off vs on, 7680×2160",
     left: { src: "images/forza-nr-full.webp", label: "Foveation off · 15 fps" },
