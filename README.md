@@ -5,6 +5,8 @@ A ReShade add-on that runs NVIDIA DLSS 5 Neural Rendering (NR) at **full resolut
 It is the open-source RenoDX DLSS 5 add-on (`renodx-dlss5`, RenoDX-DLSS5-Generic v7.5.0-rc5) with a foveated working grid added. Everything else in the add-on works as before. This repository is a fork of [RenoDX](https://github.com/clshortfuse/renodx), which provides the build system; the add-on lives in [`src/addons/dlss5`](src/addons/dlss5).
 
 > Status: pre-release. Tested in The Witcher 3 (DX12, 7680×2160, RTX 4090); other games not yet.
+>
+> **New in v0.2.0:** the centre zone can be moved anywhere on screen. Lower it for driving games like Forza Horizon or BeamNG.drive, where the sky gains nothing from DLSS 5. See [Racing / cockpit games](#example-reshadeini).
 
 ## How it works
 
@@ -120,6 +122,7 @@ On 16:9 and 21:9 screens, shrink the centre to get a real saving. For example, 2
 ### Tuning tips
 
 - **Bigger saving:** shrink the centre first, then lower the edge value. The centre is most of the cost.
+- **Put the zone where you look.** In driving and cockpit games, make the zone shorter and lower it (`NRFoveationCenterY` 60–65) so the road and dashboard stay sharp and the sky drops to the edge value.
 - **Lower edge values** (0.25–0.35) are where NR edits can start to look softer in your peripheral vision. Check in motion, not on stills.
 - **A longer fall-off** hides the transition better but saves less. 300–600 px works well at 4K-class heights.
 - **Expect a brief shimmer while dragging a slider.** Moving any foveation slider resets NR's temporal history. A size change also rebuilds NR after about half a second.
@@ -127,7 +130,8 @@ On 16:9 and 21:9 screens, shrink the centre to get a real saving. For example, 2
 ## Checking that it works
 
 - `ReShade.log` contains a line like:
-  `foveated NR active: working 5540x2132 for output 7680x2160 (centre 3000x1800, fall-off on screen 400/180 px, edge density 0.5/0.79, 71% of the NR pixels)`
+  `foveated NR active: working 5540x2132 for output 7680x2160 (centre 3000x1800 at 3840,1080, fall-off on screen 400/180 px, edge density 0.5/0.79, 71% of the NR pixels)`
+  (`at x,y` is the pixel the zone is centred on.)
 - The add-on's **Diagnostics** section shows the reduced **Working resolution**.
 - Compare frame times with foveation on and off (PresentMon or CapFrameX), not average FPS.
 
