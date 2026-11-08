@@ -290,6 +290,8 @@ struct Pipeline {
   ID3D12PipelineState* band = nullptr;
   ID3D12PipelineState* upsample = nullptr;
   ID3D12PipelineState* trace = nullptr;
+  // Half-rate NR (look_reproject.cs_5_1.hlsl): reproject, measure, clear.
+  ID3D12PipelineState* reproject = nullptr;
 };
 
 // Everything one pass's look dispatches bind.  Every table and root
@@ -386,6 +388,43 @@ inline void RecordTrace(
   list->Dispatch(
       (constants.nr_size[0] + kTraceBlock - 1) / kTraceBlock,
       (constants.nr_size[1] + kTraceBlock - 1) / kTraceBlock, 1);
+  UavBarrierAll(list);
+}
+
+// Half-rate NR, mode 0: the previous frame's edit, moved by this frame's
+// motion, into UpProxy / UpNeural at the output resolution (the caller has
+// them in UNORDERED_ACCESS and the look set's P and N' readable).
+// `constants` carries the output-pixel motion scale and the hard limit
+// (look_reproject.cs_5_1.hlsl).
+inline void RecordReproject(
+    ID3D12GraphicsCommandList* list, const Pipeline& pipeline,
+    const Bindings& bindings, Constants constants) {
+  constants.mode = 0;
+  constants.size[0] = constants.full_size[0];
+  constants.size[1] = constants.full_size[1];
+  Bind(list, pipeline, pipeline.reproject, bindings, bindings.look_set, constants);
+  list->Dispatch((constants.size[0] + 15) / 16, (constants.size[1] + 15) / 16, 1);
+  UavBarrierAll(list);
+}
+
+// Half-rate NR, modes 2 then 1: clear the statistics buffer bound as
+// HistoryOut, then accumulate this frame's motion over a grid_x x grid_y
+// sample grid inside the midpoint zone.
+inline void RecordMotionMeasure(
+    ID3D12GraphicsCommandList* list, const Pipeline& pipeline,
+    const Bindings& bindings, Constants constants, uint32_t grid_x, uint32_t grid_y) {
+  constants.mode = 2;
+  constants.size[0] = 1;
+  constants.size[1] = 1;
+  Bind(list, pipeline, pipeline.reproject, bindings, bindings.codec_set, constants);
+  list->Dispatch(1, 1, 1);
+  UavBarrierAll(list);
+  constants.mode = 1;
+  constants.size[0] = grid_x;
+  constants.size[1] = grid_y;
+  list->SetComputeRoot32BitConstants(
+      kRootConstants, sizeof(Constants) / 4, &constants, 0);
+  list->Dispatch((grid_x + 15) / 16, (grid_y + 15) / 16, 1);
   UavBarrierAll(list);
 }
 

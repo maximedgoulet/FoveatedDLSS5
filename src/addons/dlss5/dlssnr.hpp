@@ -82,6 +82,7 @@
 #include "report_bundle.hpp"
 #include "report_upload.hpp"
 #include "edit_trace.hpp"
+#include "half_rate.hpp"
 #include "gpu_timers.hpp"
 #include "look_stage.hpp"
 #include "norm_trace.hpp"
@@ -295,6 +296,9 @@ struct FeatureState {
   // re-registers the working grid, so the after path resets the temporal
   // histories when it moves (the size, if it changes, recreates as usual).
   foveation::Grid foveation{};
+  // Half-rate NR: one per after-path evaluate of this handle, so a skip only
+  // ever follows the NR frame of the IMMEDIATELY preceding evaluate.
+  uint64_t evaluate_serial = 0;
   uint32_t motion_x = 0;
   uint32_t motion_y = 0;
   uint32_t depth_x = 0;
@@ -699,6 +703,25 @@ struct FinalResources {
   D3D12_RESOURCE_STATES fov_guides_state = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
   bool fov_guides_failed = false;
   bool fov_guides_valid = false;
+  // Half-rate NR (half_rate.hpp).  half_rate_stats: the motion statistics
+  // (a small buffer resting in UNORDERED_ACCESS after its first use, like
+  // the trace histogram).  The rest describes the last frame this workset
+  // processed: whether NR ran with the transport (its P and N' are intact
+  // for a reprojection), whether it was a skip, and the evaluate serial,
+  // reset epoch and grid it ran under.
+  ID3D12Resource* half_rate_stats = nullptr;
+  bool half_rate_prev_nr = false;
+  bool half_rate_skipped_last = false;
+  uint64_t half_rate_serial = 0;
+  uint64_t half_rate_epoch = 0;
+  foveation::Grid half_rate_grid{};
+  // Multi-pass half-rate: every pass's working surfaces from the last NR
+  // frame - P (proxy), the raw N (nr_output) and the shaped N' (look_output),
+  // which the shared surfaces hold for the LAST pass only.  Created on the
+  // first multi-pass half-rate frame, resting in COPY_DEST.  half_rate_stack
+  // is the pass count that frame ran.
+  ID3D12Resource* half_rate_kept[kMaxNrPasses][3] = {};
+  uint32_t half_rate_stack = 0;
   // Write-once ring keys (AddRef'd), like motion_views.
   ID3D12Resource* fov_depth_views[kFovGuideRingSize] = {};
   ID3D12Resource* fov_motion_views[kFovGuideRingSize] = {};
@@ -1376,6 +1399,12 @@ inline constexpr float kFoveationCenterY = 50.f;
 // Zone outlines over the game: 0 off, 1 while ReShade's overlay is open,
 // 2 always (tuning while driving).
 inline constexpr uint32_t kFoveationPreview = 1;
+// Half-rate NR (half_rate.hpp): off by default.  The motion limit is in
+// percent of the screen height per frame (0.5 % = ~11 px at 2160 rows); the
+// debounce is the run of calm measurements needed to re-arm.
+inline constexpr bool kHalfRate = false;
+inline constexpr float kHalfRateMotion = 0.5f;
+inline constexpr uint32_t kHalfRateDebounce = 8;
 inline constexpr uint32_t kToggleHotkey = VK_F6;
 inline constexpr uint32_t kScreenshotHotkey = VK_F5;
 // Per-stage GPU timestamp diagnostics around the injected chain
@@ -1566,6 +1595,13 @@ inline std::atomic<float> nr_foveation_center_y = defaults::kFoveationCenterY;
 inline std::atomic_uint32_t nr_foveation_preview = defaults::kFoveationPreview;
 // The smallest centre zone the settings accept, percent of an axis.
 inline constexpr float kFoveationMinCenterPct = foveation::kMinCenterShare * 100.f;
+inline std::atomic_bool nr_half_rate = defaults::kHalfRate;
+inline std::atomic<float> nr_half_rate_motion = defaults::kHalfRateMotion;
+inline std::atomic_uint32_t nr_half_rate_debounce = defaults::kHalfRateDebounce;
+// Overlay readout: 0 = inactive (off or requirements not met), 1 = waiting
+// (motion too fast or calm run not complete), 2 = skipping alternate frames.
+inline std::atomic_uint32_t half_rate_status{0};
+inline std::atomic<float> half_rate_motion_px{0.f};
 
 // The grid for an output of width x height (uniform when off, when the
 // centre covers the screen, or when it would save under 5% of the NR
@@ -3001,6 +3037,11 @@ inline void ReleaseFinalResources(FinalResources& resources) {
   for (ID3D12Resource*& view : resources.fov_depth_views) ReleaseCom(view);
   for (ID3D12Resource*& view : resources.fov_motion_views) ReleaseCom(view);
   ReleaseCom(resources.pre_sr_source);
+  ReleaseCom(resources.half_rate_stats);
+  for (auto& kept : resources.half_rate_kept) {
+    for (ID3D12Resource*& surface : kept) ReleaseCom(surface);
+  }
+  half_rate::Forget(resources.id);
   resources = {};
 }
 
@@ -3032,6 +3073,12 @@ inline void CollectWorksetGpuObjects(
   if (res.decoded_alt != nullptr) objects.push_back(res.decoded_alt);
   if (res.pre_sr_color != nullptr) objects.push_back(res.pre_sr_color);
   if (res.pre_sr_source != nullptr) objects.push_back(res.pre_sr_source);
+  if (res.half_rate_stats != nullptr) objects.push_back(res.half_rate_stats);
+  for (const auto& kept : res.half_rate_kept) {
+    for (const ID3D12Resource* surface : kept) {
+      if (surface != nullptr) objects.push_back(surface);
+    }
+  }
   if (res.block_mean != nullptr) objects.push_back(res.block_mean);
   if (res.work0 != nullptr) objects.push_back(res.work0);
   if (res.work_a != nullptr) objects.push_back(res.work_a);
@@ -3390,6 +3437,7 @@ inline void ReleaseCodecPipeline() {
   ReleaseCom(codec_pipeline.look.band);
   ReleaseCom(codec_pipeline.look.upsample);
   ReleaseCom(codec_pipeline.look.trace);
+  ReleaseCom(codec_pipeline.look.reproject);
   ReleaseCom(codec_pipeline.look.root_signature);
   codec_pipeline = {};
 }
@@ -4005,6 +4053,26 @@ inline bool EnsureLookPipeline(ID3D12Device* device) {
   Log(
       reshade::log::level::info,
       "created the NR look stage from build-validated shader bytecode");
+  return true;
+}
+
+// Half-rate NR's program (look_reproject.cs_5_1.hlsl) on the look root
+// signature.  Separate from the look stage so a failure here only turns
+// half-rate off (logged once), never the look.
+inline std::atomic_bool half_rate_unavailable{false};
+inline bool EnsureHalfRatePipeline(ID3D12Device* device) {
+  if (codec_pipeline.look.reproject != nullptr) return true;
+  if (half_rate_unavailable.load() || !EnsureLookPipeline(device)) return false;
+  if (!CreateCodecPipelineState(
+          device, __look_reproject, &codec_pipeline.look.reproject,
+          L"DLSS5 Generic half-rate reproject", "half-rate reproject",
+          codec_pipeline.look.root_signature)) {
+    half_rate_unavailable = true;
+    Log(reshade::log::level::error,
+        "half-rate NR off for this session: its program could not be created;"
+        " Neural Rendering runs every frame");
+    return false;
+  }
   return true;
 }
 
@@ -6844,6 +6912,201 @@ inline LookRoute RunLookStage(
           res.height, true};
 }
 
+// ---------------------------------------------------------------------------
+// Half-rate NR (half_rate.hpp, look_reproject.cs_5_1.hlsl).
+
+// A write-once view of this frame's motion vectors in the workset's motion
+// ring (RunLookStage's discipline), or -1: no vectors, an integer format the
+// shader cannot read as float2, or a game cycling more resources than the
+// ring holds.
+inline int AcquireHalfRateMotionView(
+    ID3D12GraphicsCommandList* command_list, ID3D12Device* device, FinalResources& res,
+    ID3D12Resource* motion) {
+  if (motion == nullptr
+      || FovMotionViewFormat(motion->GetDesc().Format) == DXGI_FORMAT_UNKNOWN) {
+    return -1;
+  }
+  uint32_t ring = 0;
+  while (ring < kMotionRingSize && res.motion_views[ring] != nullptr
+         && res.motion_views[ring] != motion) {
+    ++ring;
+  }
+  if (ring == kMotionRingSize) {
+    look_motion_ring_full.fetch_add(1, std::memory_order_relaxed);
+    return -1;
+  }
+  if (res.motion_views[ring] == nullptr) {
+    motion->AddRef();
+    res.motion_views[ring] = motion;
+    SetSourceView(device, res, motion, kDescriptorMotionRing + ring);
+  }
+  submission::TrackUse(command_list, motion);
+  return static_cast<int>(ring);
+}
+
+// The look constants of both half-rate modes.  Motion is scaled to OUTPUT
+// pixels from the game's own scale (DLSS Programming Guide 3.6: MV * scale in
+// pixels of the grid the vectors are rendered at), false without a grid.
+inline bool HalfRateConstants(
+    const FinalResources& res, const EvaluationContract& frame, float game_scale_x,
+    float game_scale_y, look::Constants* constants) {
+  const bool low_res = (frame.create_flags & NVSDK_NGX_DLSS_Feature_Flags_MVLowRes) != 0;
+  const uint32_t grid_width = low_res ? frame.input_width : frame.output_width;
+  const uint32_t grid_height = low_res ? frame.input_height : frame.output_height;
+  if (grid_width == 0 || grid_height == 0 || res.width == 0 || res.height == 0) return false;
+  look::Constants& c = *constants;
+  c = {};
+  c.nr_size[0] = res.input_width;
+  c.nr_size[1] = res.input_height;
+  c.full_size[0] = res.width;
+  c.full_size[1] = res.height;
+  c.flags = res.hdr_mode != 0 ? look::kFlagRefLinear : 0u;
+  c.motion_scale[0] = game_scale_x * motion_scale_x_multiplier.load()
+      * static_cast<float>(res.width) / static_cast<float>(grid_width);
+  c.motion_scale[1] = game_scale_y * motion_scale_y_multiplier.load()
+      * static_cast<float>(res.height) / static_cast<float>(grid_height);
+  c.motion_base[0] = frame.motion_x;
+  c.motion_base[1] = frame.motion_y;
+  c.motion_grid[0] = grid_width;
+  c.motion_grid[1] = grid_height;
+  c.gf_eps = 0.01f;
+  const float limit =
+      std::max(1.f, nr_half_rate_motion.load() / 100.f * static_cast<float>(res.height));
+  c.strength = limit;                                  // FastLimit
+  c.brighten = limit * half_rate::kHardLimitFactor;    // HardLimit
+  c.foveation[0] = res.foveation.x.packed;
+  c.foveation[1] = res.foveation.y.packed;
+  c.foveation_center[0] = res.foveation.x.center;
+  c.foveation_center[1] = res.foveation.y.center;
+  c.foveation_bounds[0] = res.foveation.x.bounds;
+  c.foveation_bounds[1] = res.foveation.y.bounds;
+  c.foveation_blend[0] = res.foveation.x.blend;
+  c.foveation_blend[1] = res.foveation.y.blend;
+  return true;
+}
+
+inline look::Bindings HalfRateBindings(const FinalResources& res, int motion_slot) {
+  const D3D12_GPU_DESCRIPTOR_HANDLE heap_gpu =
+      res.descriptors->GetGPUDescriptorHandleForHeapStart();
+  return {
+      .heap = res.descriptors,
+      .codec_set = DescriptorHeapSlot(heap_gpu, 0, res.descriptor_size),
+      .look_set = DescriptorHeapSlot(heap_gpu, kDescriptorLookSet, res.descriptor_size),
+      .uav_table = DescriptorHeapSlot(heap_gpu, kDescriptorLookUav, res.descriptor_size),
+      .motion = DescriptorHeapSlot(
+          heap_gpu, kDescriptorMotionRing + static_cast<uint32_t>(motion_slot),
+          res.descriptor_size),
+      .history_in = res.half_rate_stats->GetGPUVirtualAddress(),
+      .history_out = res.half_rate_stats->GetGPUVirtualAddress(),
+  };
+}
+
+// Every frame of a half-rate workset: measure this frame's motion inside the
+// midpoint zone and queue its readback (half_rate::Record).  False when the
+// statistics buffer could not be created (half-rate then never skips).
+inline bool RecordHalfRateMeasure(
+    ID3D12GraphicsCommandList* command_list, ID3D12Device* device, FinalResources& res,
+    const EvaluationContract& frame, float game_scale_x, float game_scale_y,
+    int motion_slot) {
+  if (res.half_rate_stats == nullptr
+      && !CreateScratchBuffer(
+          device, half_rate::kStatsBytes, &res.half_rate_stats,
+          L"DLSS5 Generic half-rate motion statistics")) {
+    return false;
+  }
+  look::Constants constants{};
+  if (!HalfRateConstants(res, frame, game_scale_x, game_scale_y, &constants)) return false;
+  submission::TrackUse(command_list, res.half_rate_stats);
+  look::RecordMotionMeasure(
+      command_list, codec_pipeline.look, HalfRateBindings(res, motion_slot), constants,
+      half_rate::kMeasureGridX, half_rate::kMeasureGridY);
+  half_rate::Record(command_list, device, res.half_rate_stats, res.id);
+  return true;
+}
+
+// Multi-pass half-rate.  The shared working surfaces (P, N, N') hold one
+// pass at a time, so an NR frame keeps each pass's three in
+// res.half_rate_kept after that pass's look stage, and a skip frame puts
+// them back before reprojecting that pass.  False when a copy could not be
+// created (the frame then offers nothing to reproject).
+inline bool HalfRateKeepPass(
+    ID3D12GraphicsCommandList* command_list, ID3D12Device* device, FinalResources& res,
+    uint32_t pass) {
+  ID3D12Resource* const sources[3] = {res.proxy, res.nr_output, res.look_output};
+  D3D12_RESOURCE_STATES* const states[3] = {
+      &res.proxy_state, &res.nr_output_state, &res.look_output_state};
+  for (int i = 0; i < 3; ++i) {
+    ID3D12Resource*& kept = res.half_rate_kept[pass][i];
+    if (kept == nullptr) {
+      const D3D12_RESOURCE_DESC desc = sources[i]->GetDesc();
+      if (!CreateScratchTexture(
+              device, static_cast<uint32_t>(desc.Width), desc.Height, desc.Format,
+              D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_COPY_DEST, &kept,
+              L"DLSS5 Generic half-rate kept pass surface")) {
+        return false;
+      }
+    }
+    const D3D12_RESOURCE_STATES rest = *states[i];
+    Transition(command_list, sources[i], rest, D3D12_RESOURCE_STATE_COPY_SOURCE);
+    CopyMip0(command_list, kept, sources[i]);
+    Transition(command_list, sources[i], D3D12_RESOURCE_STATE_COPY_SOURCE, rest);
+  }
+  return true;
+}
+
+inline void HalfRateRestorePass(
+    ID3D12GraphicsCommandList* command_list, FinalResources& res, uint32_t pass) {
+  ID3D12Resource* const targets[3] = {res.proxy, res.nr_output, res.look_output};
+  D3D12_RESOURCE_STATES* const states[3] = {
+      &res.proxy_state, &res.nr_output_state, &res.look_output_state};
+  for (int i = 0; i < 3; ++i) {
+    ID3D12Resource* const kept = res.half_rate_kept[pass][i];
+    Transition(command_list, targets[i], *states[i], D3D12_RESOURCE_STATE_COPY_DEST);
+    Transition(
+        command_list, kept, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COPY_SOURCE);
+    CopyMip0(command_list, targets[i], kept);
+    Transition(
+        command_list, kept, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_COPY_DEST);
+    Transition(
+        command_list, targets[i], D3D12_RESOURCE_STATE_COPY_DEST,
+        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    *states[i] = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+  }
+}
+
+// A skip frame's pass: the previous frame's edit, moved by this frame's
+// motion, into the transport pair; the resolve then reads the transport set
+// 1:1 as on an NR frame.  `shaped` stays false: the restores and the v6
+// pedestal measure from the working-resolution codec set, which is the
+// previous frame's.
+inline LookRoute RecordHalfRateReprojection(
+    ID3D12GraphicsCommandList* command_list, FinalResources& res,
+    const EvaluationContract& frame, int motion_slot) {
+  look::Constants constants{};
+  HalfRateConstants(res, frame, frame.motion_scale_x, frame.motion_scale_y, &constants);
+  Transition(
+      command_list, res.proxy, res.proxy_state,
+      D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+  res.proxy_state = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+  Transition(
+      command_list, res.look_output, res.look_output_state,
+      D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+  res.look_output_state = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+  for (ID3D12Resource* surface : {res.look_up_proxy, res.look_up_neural}) {
+    Transition(
+        command_list, surface, res.look_up_state, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+  }
+  look::RecordReproject(
+      command_list, codec_pipeline.look, HalfRateBindings(res, motion_slot), constants);
+  for (ID3D12Resource* surface : {res.look_up_proxy, res.look_up_neural}) {
+    Transition(
+        command_list, surface, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+  }
+  res.look_up_state = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+  return {kDescriptorTransportSet, res.width, res.height, res.width, res.height, false};
+}
+
 inline bool SubrectFits(
     uint32_t base_x,
     uint32_t base_y,
@@ -7175,6 +7438,7 @@ inline bool ProcessInline(
 
   auto entry = FindOrRegisterFeature(handle, game_parameters, "");
   FeatureState& feature = entry->second;
+  ++feature.evaluate_serial;
   // HDR transfer mode must be current before the NR codec/resources are
   // dimensioned.  Infer it from the actual DLSS output format (linear FP16/R11G11B10
   // -> scene-linear, R10G10B10A2 -> PQ) and promote a bare SDR format to linear
@@ -7580,9 +7844,59 @@ inline bool ProcessInline(
   res.foveation = frame_foveation;
   if (res.input_width >= res.width) res.foveation.x = {};
   if (res.input_height >= res.height) res.foveation.y = {};
-  res.fov_guides_valid = res.foveation.active()
+
+  // Half-rate NR (half_rate.hpp), decided once per evaluate and before the
+  // guides.  Requirements: the setting, the transport pair live (NR below
+  // the output with Edge-aware upsampling: the reprojection writes it),
+  // readable motion vectors and the program.  Any stack count: with several
+  // passes every pass is skipped and reprojected from its kept surfaces.  Every such frame
+  // measures its motion; a frame SKIPS the evaluation only when the last
+  // frame of this workset was an NR frame of the immediately preceding
+  // evaluate, with the transport, under the same reset epoch and grid, no
+  // game reset, a healthy slot 0, no capture pending, and the motion gate
+  // armed (half_rate::Armed).  Never two skips in a row.
+  const bool half_rate_wanted = nr_half_rate.load()
+      && (look_chain.wanted & res.look_surfaces & kLookSurfaceTransport) != 0
+      && frame.motion != nullptr && EnsureHalfRatePipeline(device);
+  int half_rate_motion_slot = -1;
+  bool half_rate_on = false;
+  if (half_rate_wanted) {
+    half_rate_motion_slot =
+        AcquireHalfRateMotionView(command_list, device, res, frame.motion);
+    half_rate_on = half_rate_motion_slot >= 0
+        && RecordHalfRateMeasure(
+            command_list, device, res, frame, current.motion_scale_x,
+            current.motion_scale_y, half_rate_motion_slot);
+  }
+  const bool half_rate_consecutive = res.half_rate_serial + 1 == feature.evaluate_serial;
+  bool half_rate_slots_ready = res.half_rate_stack == requested_stack;
+  for (uint32_t pass = 0; pass < requested_stack; ++pass) {
+    half_rate_slots_ready = half_rate_slots_ready && feature.slots[pass].handle != nullptr
+        && !feature.slots[pass].failed
+        && (requested_stack == 1 || res.half_rate_kept[pass][2] != nullptr);
+  }
+  const bool half_rate_skip = half_rate_on && !capture_this_eval && res.half_rate_prev_nr
+      && !res.half_rate_skipped_last && half_rate_consecutive
+      && res.half_rate_epoch == history_reset_epoch.load(std::memory_order_relaxed)
+      && !frame.frame_reset && res.half_rate_grid == res.foveation
+      && half_rate_slots_ready && half_rate::Armed(res.id);
+  if (!half_rate_skip && res.half_rate_skipped_last && half_rate_consecutive) {
+    // The NR frame after a skip: the model's (and the look history's) last
+    // frame is two frames old, and the game's vectors describe one.  At the
+    // short motion the gate allows, two frames at constant velocity is the
+    // closest field available.
+    frame.motion_scale_x *= 2.f;
+    frame.motion_scale_y *= 2.f;
+    look_chain.motion_scale[0] *= 2.f;
+    look_chain.motion_scale[1] *= 2.f;
+  }
+  half_rate_status = !half_rate_on ? 0u : half_rate::Armed(res.id) ? 2u : 1u;
+  if (half_rate_on) half_rate_motion_px = half_rate::Inspect(res.id).mean_px;
+
+  // A skip frame hands NR nothing, so it needs no warped guides.
+  res.fov_guides_valid = res.foveation.active() && !half_rate_skip
       && RecordFoveatedGuides(command_list, device, res, frame);
-  if (res.foveation.active() && !res.fov_guides_valid) {
+  if (res.foveation.active() && !res.fov_guides_valid && !half_rate_skip) {
     static std::atomic<bool> logged_unwarped{false};
     if (!logged_unwarped.exchange(true)) {
       Log(reshade::log::level::warning,
@@ -7765,6 +8079,10 @@ inline bool ProcessInline(
   float final_pass_transfer = 0.f;
   float final_pass_color = 0.f;
   bool final_pass_shaped = false;
+  // Half-rate NR: every pass resolved through its transport set this frame
+  // (and, with several passes, had its surfaces kept), so next frame can
+  // reproject them all.
+  bool half_rate_transport = true;
   for (uint32_t pass = 0; pass < requested_stack; ++pass) {
     // Encode source and decode reference for this pass: the copied DLSS
     // output for the first pass, the previous pass's decoded result after.
@@ -7869,183 +8187,199 @@ inline bool ProcessInline(
         D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
     *ref_state = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
 
-    // Encode the running image into the proxy at the NR working resolution.
-    // Source extent is the full-res reference surface (the copied DLSS output
-    // for pass 0, the previous decoded result afterwards); the encode shader
-    // downsamples via the scaled mapping.  v6 HDR encodes the LINEAR work
-    // surface instead: area-filtered downsample, one divisor, hue shoulder,
-    // sRGB - matched to the resolve's bilinear reconstruction.
-    const uint32_t encode_src_w = width;
-    const uint32_t encode_src_h = height;
-    Transition(
-        command_list, res.proxy,
-        res.proxy_state,
-        D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-    res.proxy_state = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
-    if (res.hdr_mode != 0) {
-      BindCodecV6(
-          command_list,
-          res,
-          codec_pipeline.encode_v6,
-          srv_table_start,
-          kDescriptorProxyUav,
-          nr_input_width,
-          nr_input_height,
-          encode_src_w,
-          encode_src_h,
-          0,
-          0,
-          nr_input_width,
-          nr_input_height,
-          nr_input_width,
-          nr_input_height,
-          frame_divisor,
-          v6_pedestal_cap,
-          pass_transfer,
-          pass_color,
-          v6_encoding,
-          v6_dark_gate,
-          0.f);
+    // Half-rate NR: a skip frame replaces the encode, the evaluation and the
+    // look stage of every pass with the reprojection of that pass's edit
+    // from the previous frame; the resolves and the write-back below run
+    // unchanged.
+    LookRoute route{};
+    if (half_rate_skip) {
+      if (requested_stack > 1) HalfRateRestorePass(command_list, res, pass);
+      route = RecordHalfRateReprojection(command_list, res, frame, half_rate_motion_slot);
+      route.srv_set += srv_table_start;
     } else {
-      BindCodec(
-          command_list,
+      // Encode the running image into the proxy at the NR working resolution.
+      // Source extent is the full-res reference surface (the copied DLSS output
+      // for pass 0, the previous decoded result afterwards); the encode shader
+      // downsamples via the scaled mapping.  v6 HDR encodes the LINEAR work
+      // surface instead: area-filtered downsample, one divisor, hue shoulder,
+      // sRGB - matched to the resolve's bilinear reconstruction.
+      const uint32_t encode_src_w = width;
+      const uint32_t encode_src_h = height;
+      Transition(
+          command_list, res.proxy,
+          res.proxy_state,
+          D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+      res.proxy_state = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+      if (res.hdr_mode != 0) {
+        BindCodecV6(
+            command_list,
+            res,
+            codec_pipeline.encode_v6,
+            srv_table_start,
+            kDescriptorProxyUav,
+            nr_input_width,
+            nr_input_height,
+            encode_src_w,
+            encode_src_h,
+            0,
+            0,
+            nr_input_width,
+            nr_input_height,
+            nr_input_width,
+            nr_input_height,
+            frame_divisor,
+            v6_pedestal_cap,
+            pass_transfer,
+            pass_color,
+            v6_encoding,
+            v6_dark_gate,
+            0.f);
+      } else {
+        BindCodec(
+            command_list,
+            res,
+            codec_pipeline.encode,
+            srv_table_start,
+            kDescriptorProxyUav,
+            nr_input_width,
+            nr_input_height,
+            encode_src_w,
+            encode_src_h,
+            0,
+            0,
+            nr_input_width,
+            nr_input_height,
+            nr_input_width,
+            nr_input_height,
+            frame_paper_white,
+            frame_diffuse_white,
+            pass_transfer,
+            pass_color);
+      }
+      if (timers_active) {
+        gpu_timers::Mark(
+            command_list, gpu_timers::PassEncodeStart(pass));
+      }
+      command_list->Dispatch((nr_input_width + 15) / 16, (nr_input_height + 15) / 16, 1);
+      UavBarrier(command_list, res.proxy);
+      if (timers_active) {
+        gpu_timers::Mark(command_list, gpu_timers::PassEncodeEnd(pass));
+      }
+      if (capture_this_eval) {
+        // Diagnostics: copy the sRGB proxy the model is about to see.
+        Transition(
+            command_list, res.proxy,
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+            D3D12_RESOURCE_STATE_COPY_SOURCE);
+        screenshot::RecordStackPlaneCopy(
+            device, command_list, res.proxy,
+            res.input_width, res.input_height,
+            "proxy", pass, requested_stack);
+        Transition(
+            command_list, res.proxy,
+            D3D12_RESOURCE_STATE_COPY_SOURCE,
+            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+      } else {
+        Transition(
+            command_list, res.proxy,
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+      }
+      res.proxy_state = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+
+      Transition(
+          command_list, res.nr_output,
+          res.nr_output_state,
+          D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+      res.nr_output_state = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+      SetEvaluationParameters(
+          feature,
+          feature.slots[pass],
+          pass,
+          chain_reset_epoch,
           res,
-          codec_pipeline.encode,
-          srv_table_start,
-          kDescriptorProxyUav,
+          frame,
           nr_input_width,
           nr_input_height,
-          encode_src_w,
-          encode_src_h,
-          0,
-          0,
-          nr_input_width,
-          nr_input_height,
-          nr_input_width,
-          nr_input_height,
-          frame_paper_white,
-          frame_diffuse_white,
-          pass_transfer,
-          pass_color);
-    }
-    if (timers_active) {
-      gpu_timers::Mark(
-          command_list, gpu_timers::PassEncodeStart(pass));
-    }
-    command_list->Dispatch((nr_input_width + 15) / 16, (nr_input_height + 15) / 16, 1);
-    UavBarrier(command_list, res.proxy);
-    if (timers_active) {
-      gpu_timers::Mark(command_list, gpu_timers::PassEncodeEnd(pass));
-    }
-    if (capture_this_eval) {
-      // Diagnostics: copy the sRGB proxy the model is about to see.
-      Transition(
-          command_list, res.proxy,
-          D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
-          D3D12_RESOURCE_STATE_COPY_SOURCE);
-      screenshot::RecordStackPlaneCopy(
-          device, command_list, res.proxy,
-          res.input_width, res.input_height,
-          "proxy", pass, requested_stack);
-      Transition(
-          command_list, res.proxy,
-          D3D12_RESOURCE_STATE_COPY_SOURCE,
-          D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-    } else {
-      Transition(
-          command_list, res.proxy,
-          D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
-          D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-    }
-    res.proxy_state = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+          feature_out_width,
+          feature_out_height);
 
-    Transition(
-        command_list, res.nr_output,
-        res.nr_output_state,
-        D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-    res.nr_output_state = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
-    SetEvaluationParameters(
-        feature,
-        feature.slots[pass],
-        pass,
-        chain_reset_epoch,
-        res,
-        frame,
-        nr_input_width,
-        nr_input_height,
-        feature_out_width,
-        feature_out_height);
-
-    if (timers_active) {
-      gpu_timers::Mark(command_list, gpu_timers::PassEvalStart(pass));
-    }
-    // The NGX runtime records this handle's work into the game's list: a
-    // tracked use, so a later retirement waits for exactly this submission.
-    submission::TrackUse(command_list, feature.slots[pass].handle);
-    NVSDK_NGX_Result nr_result = NVSDK_NGX_Result_FAIL_UnableToInitializeFeature;
-    {
-      DirectCallScope ngx_direct_call;
-      try {
-        nr_result = feature.slots[pass].via_core
-            ? core_evaluate_feature(
-                  command_list,
-                  feature.slots[pass].handle,
-                  feature.slots[pass].parameters,
-                  nullptr)
-            : direct_api.evaluate(
-                  command_list,
-                  feature.slots[pass].handle,
-                  feature.slots[pass].parameters,
-                  nullptr);
-      } catch (...) {
-        // The shared failure path below retains the game DLSS output,
-        // releases the handle, and arms the correct retry policy; the
-        // exception only substitutes the result code.
-        Log(reshade::log::level::error, "feature 18 evaluate raised an exception");
-        nr_result = NVSDK_NGX_Result_FAIL_UnableToInitializeFeature;
+      if (timers_active) {
+        gpu_timers::Mark(command_list, gpu_timers::PassEvalStart(pass));
+      }
+      // The NGX runtime records this handle's work into the game's list: a
+      // tracked use, so a later retirement waits for exactly this submission.
+      submission::TrackUse(command_list, feature.slots[pass].handle);
+      NVSDK_NGX_Result nr_result = NVSDK_NGX_Result_FAIL_UnableToInitializeFeature;
+      {
+        DirectCallScope ngx_direct_call;
+        try {
+          nr_result = feature.slots[pass].via_core
+              ? core_evaluate_feature(
+                    command_list,
+                    feature.slots[pass].handle,
+                    feature.slots[pass].parameters,
+                    nullptr)
+              : direct_api.evaluate(
+                    command_list,
+                    feature.slots[pass].handle,
+                    feature.slots[pass].parameters,
+                    nullptr);
+        } catch (...) {
+          // The shared failure path below retains the game DLSS output,
+          // releases the handle, and arms the correct retry policy; the
+          // exception only substitutes the result code.
+          Log(reshade::log::level::error, "feature 18 evaluate raised an exception");
+          nr_result = NVSDK_NGX_Result_FAIL_UnableToInitializeFeature;
+        }
+      }
+      last_result = static_cast<uint32_t>(nr_result);
+      if (NVSDK_NGX_FAILED(nr_result)) {
+        stack_failure = nr_result;
+        failed_pass = pass;
+        break;
+      }
+      // Decode pass: blend the neural result over this pass's reference image
+      // and upscale from the NR working resolution to the output resolution.
+      // v6 HDR resolves in LINEAR source units onto the work ping-pong
+      // surface (no transfer function until the single commit below).
+      UavBarrier(command_list, res.nr_output);
+      if (timers_active) {
+        gpu_timers::Mark(command_list, gpu_timers::PassEvalEnd(pass));
+      }
+      if (capture_this_eval) {
+        // Diagnostics: the RAW neural output, before any transfer - evidence
+        // of what the model actually returns for the conditioned proxy.  With
+        // a multi-pass stack each pass records its own plane.
+        Transition(
+            command_list, res.nr_output,
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+            D3D12_RESOURCE_STATE_COPY_SOURCE);
+        screenshot::RecordStackPlaneCopy(
+            device, command_list, res.nr_output,
+            res.input_width, res.input_height,
+            "neural", pass, requested_stack);
+        Transition(
+            command_list, res.nr_output,
+            D3D12_RESOURCE_STATE_COPY_SOURCE,
+            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+      } else {
+        Transition(
+            command_list, res.nr_output,
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+      }
+      res.nr_output_state = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+      // The look stage reshapes the model's edit (or measures it) before the
+      // resolve, which then reads the route it returns.
+      route = RunLookStage(
+          command_list, device, res, feature.slots[pass], pass, look_chain, frame);
+      if (half_rate_on) {
+        half_rate_transport = half_rate_transport
+            && route.srv_set == kDescriptorTransportSet + srv_table_start
+            && (requested_stack == 1 || HalfRateKeepPass(command_list, device, res, pass));
       }
     }
-    last_result = static_cast<uint32_t>(nr_result);
-    if (NVSDK_NGX_FAILED(nr_result)) {
-      stack_failure = nr_result;
-      failed_pass = pass;
-      break;
-    }
-    // Decode pass: blend the neural result over this pass's reference image
-    // and upscale from the NR working resolution to the output resolution.
-    // v6 HDR resolves in LINEAR source units onto the work ping-pong
-    // surface (no transfer function until the single commit below).
-    UavBarrier(command_list, res.nr_output);
-    if (timers_active) {
-      gpu_timers::Mark(command_list, gpu_timers::PassEvalEnd(pass));
-    }
-    if (capture_this_eval) {
-      // Diagnostics: the RAW neural output, before any transfer - evidence
-      // of what the model actually returns for the conditioned proxy.  With
-      // a multi-pass stack each pass records its own plane.
-      Transition(
-          command_list, res.nr_output,
-          D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
-          D3D12_RESOURCE_STATE_COPY_SOURCE);
-      screenshot::RecordStackPlaneCopy(
-          device, command_list, res.nr_output,
-          res.input_width, res.input_height,
-          "neural", pass, requested_stack);
-      Transition(
-          command_list, res.nr_output,
-          D3D12_RESOURCE_STATE_COPY_SOURCE,
-          D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-    } else {
-      Transition(
-          command_list, res.nr_output,
-          D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
-          D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-    }
-    res.nr_output_state = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
-    // The look stage reshapes the model's edit (or measures it) before the
-    // resolve, which then reads the route it returns.
-    const LookRoute route =
-        RunLookStage(command_list, device, res, feature.slots[pass], pass, look_chain, frame);
     Transition(
         command_list, write_surface,
         *write_state,
@@ -8317,6 +8651,11 @@ inline bool ProcessInline(
     gpu_timers::End(command_list);
   }
   device->Release();
+  if (NVSDK_NGX_FAILED(stack_failure) || executed < 0) {
+    // Half-rate NR: nothing reusable for a reprojection next frame.
+    res.half_rate_prev_nr = false;
+    res.half_rate_skipped_last = false;
+  }
   if (NVSDK_NGX_FAILED(stack_failure)) {
     // Park the tracked states: the proxy is post-encode (SRV-readable) and
     // returns to its UAV resting state; nr_output is already parked; the
@@ -8381,6 +8720,15 @@ inline bool ProcessInline(
     CountNrDecline(NrDeclineReason::kSlotWarmupMaturation);
     return true;
   }
+  // Half-rate NR: what the next frame of this workset may reuse.
+  res.half_rate_prev_nr = !half_rate_skip && half_rate_on && half_rate_transport
+      && executed == static_cast<int32_t>(requested_stack) - 1;
+  res.half_rate_stack = requested_stack;
+  res.half_rate_skipped_last = half_rate_skip;
+  res.half_rate_serial = feature.evaluate_serial;
+  res.half_rate_epoch = chain_reset_epoch;
+  res.half_rate_grid = res.foveation;
+  if (half_rate_on) half_rate::CountFrame(half_rate_skip);
   for (auto& slot : feature.slots) slot.fail_count = 0;
   const uint64_t count = ++successful_evaluations;
   streamline_escalation_deficits.store(0, std::memory_order_relaxed);
@@ -15031,6 +15379,7 @@ inline void RunLifecycleTick(int64_t present_ns) {
     gpu_timers::Poll(queue_tracking_active.load());
     norm_trace::Poll(queue_tracking_active.load());
     edit_trace::Poll(queue_tracking_active.load());
+    half_rate::Poll(queue_tracking_active.load(), nr_half_rate_debounce.load());
     if (present_ns != 0) {
       if (telemetry_previous_present_ns != 0) {
         telemetry_pacing.Add((present_ns - telemetry_previous_present_ns) / 1e6);
@@ -15542,6 +15891,14 @@ inline constexpr Setting kSetFoveationCenterY{
 inline constexpr Setting kSetFoveationPreview{
     "NRFoveationPreview", &nr_foveation_preview, defaults::kFoveationPreview,
     SettingEffect::kNone};
+inline constexpr Setting kSetHalfRate{
+    "NRHalfRate", &nr_half_rate, defaults::kHalfRate, SettingEffect::kNone};
+inline constexpr Setting kSetHalfRateMotion{
+    "NRHalfRateMotion", &nr_half_rate_motion, defaults::kHalfRateMotion,
+    SettingEffect::kNone};
+inline constexpr Setting kSetHalfRateDebounce{
+    "NRHalfRateDebounce", &nr_half_rate_debounce, defaults::kHalfRateDebounce,
+    SettingEffect::kNone};
 
 // Lowering the pass count must free the retired passes' NR feature handles;
 // raising it starts the new passes from clean temporal state.  The per-pass
@@ -15812,7 +16169,8 @@ inline constexpr const Setting* kPerformanceSettings[] = {
     &kSetFoveation,       &kSetFoveationCenterW, &kSetFoveationCenterH,
     &kSetFoveationContourW, &kSetFoveationContourH, &kSetFoveationFalloffPct,
     &kSetFoveationBlendPct, &kSetFoveationEdge, &kSetFoveationCenterX,
-    &kSetFoveationCenterY, &kSetFoveationPreview, &kSetLookUpsample};
+    &kSetFoveationCenterY, &kSetFoveationPreview, &kSetHalfRate, &kSetHalfRateMotion,
+    &kSetHalfRateDebounce, &kSetLookUpsample};
 inline constexpr const Setting* kStackingSettings[] = {
     &kSetStackPasses,     &kSetPassIntensity[0], &kSetPassIntensity[1],
     &kSetPassIntensity[2], &kSetPassTransfer[0], &kSetPassTransfer[1],
@@ -16769,6 +17127,50 @@ inline void DrawSectionStackingResolution(const ui::PanelText& text) {
     }
     ImGui::EndDisabled();
   }
+  // Half-rate NR (half_rate.hpp): after upscaling only.
+  {
+    ImGui::BeginDisabled(nr_before_upscale.load());
+    ToggleSetting(
+        text, kSetHalfRate, "Half-rate NR",
+        "Runs Neural Rendering every other frame and carries its change"
+        " through the frame in between with the game's motion vectors:"
+        " about half the NR cost on calm frames.  It stops skipping as soon"
+        " as motion gets fast and resumes only after motion has stayed calm"
+        " for the debounce.  Works with any number of stack passes.  Needs NR"
+        " below the output resolution (Foveated resolution, or Resolution under"
+        " 100%) with Edge-aware upsampling.");
+    if (nr_half_rate.load()) {
+      SliderSetting(
+          text, kSetHalfRateMotion, "Half-rate motion limit", 0.1f, 3.f,
+          "%.1f%% of height",
+          "Motion per frame, in percent of the screen height, above which a"
+          " pixel counts as fast.  When more than 5% of the midpoint zone is"
+          " fast, NR runs every frame again.  Lower is safer.");
+      SliderSetting(
+          text, kSetHalfRateDebounce, "Half-rate debounce", 1.f, 30.f, "%.0f frames",
+          "How many calm frames in a row are needed before skipping resumes"
+          " after fast motion.  It never resumes while the last frame was"
+          " still fast.");
+      const uint32_t status = half_rate_status.load();
+      const uint64_t skipped = half_rate::SkippedFrames();
+      const uint64_t total = skipped + half_rate::NrFrames();
+      char readout[160];
+      std::snprintf(
+          readout, sizeof(readout), "%s, motion %.1f px, NR skipped on %.0f%% of frames",
+          status == 2 ? "skipping" : status == 1 ? "waiting for calm motion"
+                                                 : "inactive (see the requirements)",
+          half_rate_motion_px.load(),
+          total != 0 ? 100.0 * static_cast<double>(skipped) / static_cast<double>(total)
+                     : 0.0);
+      if (text.modern) {
+        ui::RowLabel("Half-rate");
+        ImGui::TextWrapped("%s", readout);
+      } else {
+        ImGui::TextWrapped("Half-rate: %s", readout);  // i18n: skip (Developer view)
+      }
+    }
+    ImGui::EndDisabled();
+  }
   if (last_input_width.load() != 0) {
     if (text.modern) {
       ui::RowLabel("Working at");
@@ -17587,6 +17989,9 @@ inline std::string BuildSupportReport() {
          << " NRFoveationCenterX=" << nr_foveation_center_x.load()
          << " NRFoveationCenterY=" << nr_foveation_center_y.load()
          << " NRFoveationPreview=" << nr_foveation_preview.load()
+         << " NRHalfRate=" << nr_half_rate.load()
+         << " NRHalfRateMotion=" << nr_half_rate_motion.load()
+         << " NRHalfRateDebounce=" << nr_half_rate_debounce.load()
          << " EnableHooks="
          << (!hooks_enabled.load() ? 0 : streamline_hooks_enabled.load() ? 1 : 2)
          << " DX11Source="
@@ -18830,6 +19235,9 @@ inline void LoadConfiguration() {
     float saved_center_x = defaults::kFoveationCenterX;
     float saved_center_y = defaults::kFoveationCenterY;
     uint32_t saved_preview = defaults::kFoveationPreview;
+    bool saved_half_rate = defaults::kHalfRate;
+    float saved_half_rate_motion = defaults::kHalfRateMotion;
+    uint32_t saved_half_rate_debounce = defaults::kHalfRateDebounce;
     reshade::get_config_value(nullptr, kConfigSection, "NRFoveation", saved_foveation);
     reshade::get_config_value(nullptr, kConfigSection, "NRFoveationCenterW", saved_center_w);
     reshade::get_config_value(nullptr, kConfigSection, "NRFoveationCenterH", saved_center_h);
@@ -18841,6 +19249,10 @@ inline void LoadConfiguration() {
     reshade::get_config_value(nullptr, kConfigSection, "NRFoveationCenterX", saved_center_x);
     reshade::get_config_value(nullptr, kConfigSection, "NRFoveationCenterY", saved_center_y);
     reshade::get_config_value(nullptr, kConfigSection, "NRFoveationPreview", saved_preview);
+    reshade::get_config_value(nullptr, kConfigSection, "NRHalfRate", saved_half_rate);
+    reshade::get_config_value(nullptr, kConfigSection, "NRHalfRateMotion", saved_half_rate_motion);
+    reshade::get_config_value(
+        nullptr, kConfigSection, "NRHalfRateDebounce", saved_half_rate_debounce);
     nr_foveation = saved_foveation;
     nr_foveation_center_w = SanitizeFloatKey(
         saved_center_w, defaults::kFoveationCenterW, kFoveationMinCenterPct, 100.f,
@@ -18872,6 +19284,12 @@ inline void LoadConfiguration() {
         saved_center_y, defaults::kFoveationCenterY, 0.f, 100.f, "NRFoveationCenterY");
     nr_foveation_preview = SanitizeEnumKey(
         saved_preview, defaults::kFoveationPreview, 0u, 2u, "NRFoveationPreview");
+    nr_half_rate = saved_half_rate;
+    nr_half_rate_motion = SanitizeFloatKey(
+        saved_half_rate_motion, defaults::kHalfRateMotion, 0.1f, 3.f, "NRHalfRateMotion");
+    nr_half_rate_debounce = SanitizeEnumKey(
+        saved_half_rate_debounce, defaults::kHalfRateDebounce, 1u, 30u,
+        "NRHalfRateDebounce");
   }
   gpu_timers_enabled = saved_gpu_timers;
   edit_trace_enabled = saved_edit_trace;
@@ -19475,6 +19893,7 @@ inline bool Shutdown(bool proof_gated) {
     gpu_timers::ReleaseAll();
     norm_trace::ReleaseAll();
     edit_trace::ReleaseAll();
+    half_rate::ReleaseAll();
     telemetry::ReleaseAdapter();
     telemetry_probe_lease = GpuLease{};
     telemetry_probe_taken = false;
