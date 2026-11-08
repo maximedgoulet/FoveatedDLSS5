@@ -1598,8 +1598,11 @@ inline constexpr float kFoveationMinCenterPct = foveation::kMinCenterShare * 100
 inline std::atomic_bool nr_half_rate = defaults::kHalfRate;
 inline std::atomic<float> nr_half_rate_motion = defaults::kHalfRateMotion;
 inline std::atomic_uint32_t nr_half_rate_debounce = defaults::kHalfRateDebounce;
-// Overlay readout: 0 = inactive (off or requirements not met), 1 = waiting
-// (motion too fast or calm run not complete), 2 = skipping alternate frames.
+// Overlay readout, from the last evaluate: 0 off or no NR frame yet,
+// 1 waiting (motion too fast or calm run not complete), 2 skipping
+// alternate frames, 3 no transport pair (Classic upsampling, or NR at the
+// output resolution), 4 no motion vectors from the game, 5 the program or
+// the motion statistics could not be created.
 inline std::atomic_uint32_t half_rate_status{0};
 inline std::atomic<float> half_rate_motion_px{0.f};
 
@@ -7890,7 +7893,12 @@ inline bool ProcessInline(
     look_chain.motion_scale[0] *= 2.f;
     look_chain.motion_scale[1] *= 2.f;
   }
-  half_rate_status = !half_rate_on ? 0u : half_rate::Armed(res.id) ? 2u : 1u;
+  half_rate_status = !nr_half_rate.load() ? 0u
+      : (look_chain.wanted & res.look_surfaces & kLookSurfaceTransport) == 0 ? 3u
+      : frame.motion == nullptr ? 4u
+      : !half_rate_on ? 5u
+      : half_rate::Armed(res.id) ? 2u
+      : 1u;
   if (half_rate_on) half_rate_motion_px = half_rate::Inspect(res.id).mean_px;
 
   // A skip frame hands NR nothing, so it needs no warped guides.
@@ -15309,6 +15317,8 @@ inline void EmitTelemetry(int64_t now_ns, bool force = false) {
              << nr_foveation_falloff_pct.load() << "% blend " << nr_foveation_blend_pct.load()
              << "% midpoint " << nr_foveation_edge.load() << " @"
              << nr_foveation_center_x.load() << ',' << nr_foveation_center_y.load()
+             << " half_rate=" << nr_half_rate.load() << ':' << nr_half_rate_motion.load()
+             << "%/" << nr_half_rate_debounce.load() << " status=" << half_rate_status.load()
              << " follow_input=" << nr_follow_input_res.load()
              << " look=" << look_mode.load() << " stabilize=" << look_stabilize.load()
              << " upsample=" << look_upsample.load() << " codec=" << codec_mode.load()
@@ -17127,9 +17137,13 @@ inline void DrawSectionStackingResolution(const ui::PanelText& text) {
     }
     ImGui::EndDisabled();
   }
-  // Half-rate NR (half_rate.hpp): after upscaling only.
+  // Half-rate NR (half_rate.hpp): after upscaling only.  It reprojects
+  // through the transport pair, which only Edge-aware upsampling keeps, so
+  // turning it on switches Classic to Edge-aware, and the readout names any
+  // requirement still missing, with a button when one click fixes it.
   {
     ImGui::BeginDisabled(nr_before_upscale.load());
+    const bool half_rate_was_on = nr_half_rate.load();
     ToggleSetting(
         text, kSetHalfRate, "Half-rate NR",
         "Runs Neural Rendering every other frame and carries its change"
@@ -17138,7 +17152,10 @@ inline void DrawSectionStackingResolution(const ui::PanelText& text) {
         " as motion gets fast and resumes only after motion has stayed calm"
         " for the debounce.  Works with any number of stack passes.  Needs NR"
         " below the output resolution (Foveated resolution, or Resolution under"
-        " 100%) with Edge-aware upsampling.");
+        " 100%) with Edge-aware upsampling: turning it on selects Edge-aware.");
+    if (nr_half_rate.load() && !half_rate_was_on && look_upsample.load() == 0u) {
+      kSetLookUpsample.Commit(1.f);
+    }
     if (nr_half_rate.load()) {
       SliderSetting(
           text, kSetHalfRateMotion, "Half-rate motion limit", 0.1f, 3.f,
@@ -17154,19 +17171,47 @@ inline void DrawSectionStackingResolution(const ui::PanelText& text) {
       const uint32_t status = half_rate_status.load();
       const uint64_t skipped = half_rate::SkippedFrames();
       const uint64_t total = skipped + half_rate::NrFrames();
-      char readout[160];
-      std::snprintf(
-          readout, sizeof(readout), "%s, motion %.1f px, NR skipped on %.0f%% of frames",
-          status == 2 ? "skipping" : status == 1 ? "waiting for calm motion"
-                                                 : "inactive (see the requirements)",
-          half_rate_motion_px.load(),
-          total != 0 ? 100.0 * static_cast<double>(skipped) / static_cast<double>(total)
-                     : 0.0);
+      // What blocks it, most fixable first: the settings are read here, the
+      // rest comes from the last evaluate.
+      const bool classic = look_upsample.load() == 0u;
+      const bool full_res = !nr_foveation.load() && nr_resolution_scale.load() >= 1.f;
+      const char* state = status == 2 ? "skipping"
+          : status == 1               ? "waiting for calm motion"
+          : classic                   ? "off: needs Edge-aware upsampling"
+          : full_res ? "off: needs NR below the output resolution (turn on Foveated resolution)"
+          : status == 3 ? "off: starting (needs a few frames)"
+          : status == 4 ? "off: the game gives no motion vectors"
+          : status == 5 ? "off: could not start (see ReShade.log)"
+                        : "off: no NR frame yet";
+      char readout[192];
+      if (status == 1 || status == 2) {
+        std::snprintf(
+            readout, sizeof(readout), "%s, motion %.1f px, NR skipped on %.0f%% of frames",
+            state, half_rate_motion_px.load(),
+            total != 0 ? 100.0 * static_cast<double>(skipped) / static_cast<double>(total)
+                       : 0.0);
+      } else {
+        std::snprintf(readout, sizeof(readout), "%s", state);
+      }
       if (text.modern) {
         ui::RowLabel("Half-rate");
-        ImGui::TextWrapped("%s", readout);
+        if (status == 1 || status == 2) {
+          ImGui::TextWrapped("%s", readout);
+        } else {
+          ImGui::TextColored(ui::tokens::kWarn, "%s", readout);
+        }
       } else {
         ImGui::TextWrapped("Half-rate: %s", readout);  // i18n: skip (Developer view)
+      }
+      if (classic) {
+        if (text.modern) ui::RowLabel("");
+        if (ImGui::Button(ui::Tr("Use Edge-aware upsampling"))) kSetLookUpsample.Commit(1.f);
+      } else if (full_res) {
+        if (text.modern) ui::RowLabel("");
+        if (ImGui::Button(ui::Tr("Turn on Foveated resolution"))) {
+          kSetFoveation.Commit(1.f);
+          nr_resolution_commit_now = true;
+        }
       }
     }
     ImGui::EndDisabled();
