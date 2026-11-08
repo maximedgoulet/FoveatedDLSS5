@@ -10,9 +10,9 @@ else in the tree is upstream and untouched. Read `AGENTS.md` (upstream rules) an
 | What | Where |
 |---|---|
 | Add-on (header-only, `dlssnr.hpp` is ~19k lines) | `src/addons/dlss5/` |
-| Zone math, host side (`Params`, `MakeAxis`, `MakeGrid`, `Warp`; `SizeAxis` from `feat/percent-zones` on) | `src/addons/dlss5/foveation.hpp` |
+| Zone math, host side (`Params`, `MakeAxis`, `MakeGrid`, `Warp`, `SizeAxis`) | `src/addons/dlss5/foveation.hpp` |
 | Zone math, shader side (`FovDecode`, `FovWarp`, `FovZoneWeight`) | `src/addons/dlss5/shaders/foveation.hlsli` |
-| Settings, overlay panel, zone map, on-screen zone preview | `src/addons/dlss5/dlssnr.hpp` (search `kSetFoveation`; `DrawZoneMap` and `OnZonePreviewOverlay` from `feat/percent-zones` on) |
+| Settings, overlay panel, zone map, on-screen zone preview | `src/addons/dlss5/dlssnr.hpp` (search `kSetFoveation`; `DrawZoneMap`, `OnZonePreviewOverlay`) |
 | Technical doc (math, keys, safeguards) | `src/addons/dlss5/FOVEATION.md` |
 | Player-facing doc, presets, savings tables | `README.md` |
 | The only CI workflow | `.github/workflows/build-dlss5.yml` |
@@ -82,9 +82,9 @@ sizes are static_asserted in `dlssnr.hpp` and `look_stage.hpp`.
 
 ## Roadmap state (update when it changes)
 
-- `main`: v0.3.0 released (movable zones, dual foveation, pixel-based settings).
-- `feat/percent-zones`: percent zones, zone map, forecast, on-screen preview.
-  CI green; waiting for an in-game test, then merge and release as v0.4.0.
+- `main`: v0.4.0 released (percent zones, zone map, NR saving forecast, on-screen
+  zone preview). v0.3.0 had pixel-based settings; those keys are no longer read.
+  First field test 2026-11-08: Forza Horizon, 7680x2160, zones and preview work.
 - `feat/half-rate`: half-rate NR (NR every other frame, reprojected through motion
   vectors, disarmed for a debounce of frames when motion is fast). CI green, not
   tested in game. Will need a rebase on the percent-zones settings.
