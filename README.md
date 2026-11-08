@@ -2,11 +2,11 @@
 
 ### DLSS 5 Neural Rendering where your eyes are. Nowhere else.
 
-**Up to 5.8× less Neural Rendering work** on a 32:9 screen, and still 2–3× on a plain 16:9 monitor. You get full NR quality in the middle of the action and a softer NR treatment around it. Beyond that, NR is switched off entirely: the roof liner, the sky above the windshield, the far edges of a super-ultrawide.
+**Up to 5.5× less Neural Rendering work** on a 32:9 screen, and still 2–3× on a plain 16:9 monitor. You get full NR quality in the middle of the action and a softer NR treatment in a contour around it. Beyond that, NR is switched off entirely: the roof liner, the sky above the windshield, the far edges of a super-ultrawide.
 
 FoveatedDLSS5 is the open-source RenoDX DLSS 5 add-on (`renodx-dlss5`, RenoDX-DLSS5-Generic v7.5.0-rc5) with **dual foveation** built in. Everything else in the add-on works exactly as before, and with foveation off it *is* the stock add-on.
 
-> **Status: pre-release.** v0.1 was tested in The Witcher 3 (DX12, 7680×2160, RTX 4090). The movable zones and dual foveation (v0.3) are new and not yet tested in a game. Field reports are very welcome.
+> **Status: pre-release.** v0.1 was tested in The Witcher 3 (DX12, 7680×2160, RTX 4090). The movable zones, dual foveation (v0.3), and the percent-based zones with the on-screen preview (v0.4) are new and not yet fully tested in games. Field reports are very welcome.
 
 ---
 
@@ -18,9 +18,9 @@ So FoveatedDLSS5 spends NR like a budget, in three zones:
 
 ```
 ┌──────────────────────────────────────────────────────────────────────┐
-│ OFF: game image as-is (sky, roof liner, far edges)                   │
+│ EDGE, NR OFF: game image as-is (sky, roof liner, far edges)          │
 │      ┌────────────────────────────────────────────────────────┐      │
-│      │ MIDPOINT ZONE: NR at midpoint resolution (e.g. 50 %)   │      │
+│      │ CONTOUR: NR at the contour resolution (e.g. 50 %)      │      │
 │      │          ┌──────────────────────────────┐              │      │
 │      │          │ CENTRE ZONE                  │              │      │
 │      │          │ NR at full centre resolution │              │      │
@@ -31,83 +31,61 @@ So FoveatedDLSS5 spends NR like a budget, in three zones:
 └──────────────────────────────────────────────────────────────────────┘
 ```
 
-All three rectangles are yours to size and place. Racing game? Slide the zones down so the road and the dash get everything and the sky gets nothing.
+Per axis it's simple arithmetic: **centre + contour + edge = 100 %**. When you switch foveation on, you start with a 50 % centre, a 25 % contour and a 25 % edge. No combination can contradict itself. While you tune, the overlay draws the zones **right over the game** and shows the saving before you even open a frame counter.
+
+Racing game? Slide the zones down so the road and the dash get everything and the sky gets nothing.
 
 ## The numbers
 
 How much of a full-screen NR pass is left (NR pixels, centre at native resolution). Lower is better, and the speed-up is in brackets:
 
-| Preset | 16:9 (3840×2160) | 21:9 (3440×1440) | 32:9 (5120×1440) | 32:9 (7680×2160) |
-|---|---|---|---|---|
-| Stock add-on | 100 % | 100 % | 100 % | 100 % |
-| Classic foveation (v0.1 defaults) | 93 % (1.1×) | 82 % (1.2×) | 71 % (1.4×) | 71 % (1.4×) |
-| **Balanced** | 71 % (1.4×) | 60 % (1.7×) | 40 % (2.5×) | 40 % (2.5×) |
-| **Racing** | 51 % (2.0×) | 39 % (2.5×) | 26 % (3.8×) | 26 % (3.8×) |
-| **Aggressive** | 34 % (2.9×) | 26 % (3.9×) | 17 % (5.8×) | 17 % (5.8×) |
+| Preset | 16:9 (3840×2160) | 21:9 (3440×1440) | 32:9 (5120×1440 / 7680×2160) |
+|---|---|---|---|
+| Stock add-on | 100 % | 100 % | 100 % |
+| Default layout (50 % + 25 %) | 43 % (2.3×) | 43 % (2.3×) | 43 % (2.3×) |
+| **Balanced** | 69 % (1.4×) | 60 % (1.7×) | 41 % (2.5×) |
+| **Racing** | 51 % (2.0×) | 40 % (2.5×) | 26 % (3.8×) |
+| **Aggressive** | 36 % (2.8×) | 27 % (3.7×) | 18 % (5.5×) |
 
-**Why wider screens win bigger:** what your eyes cover scales with the screen's *height*, not its width. On 32:9 the extra width is all periphery, and that's exactly what foveation trims.
+**Why wider screens win bigger:** what your eyes cover scales with the screen's *height*, not its width. On 32:9 the extra width is all periphery, and that's exactly what foveation trims. The presets below keep the same zone *heights* on every display and take a smaller share of the width on wider screens.
 
-> These are theoretical NR pixel counts from the add-on's own math, not measured frame times. NR's cost tracks its pixel count, but the add-on's own passes (squeeze, guide resample, resolve) and fixed overheads remain, so the real frame-time gain is smaller. Measure with PresentMon or CapFrameX and tell us what you get.
+> These are theoretical NR pixel counts from the add-on's own math, not measured frame times. NR's cost tracks its pixel count, but the add-on's own passes (squeeze, guide resample, resolve) and fixed overheads remain, so the real frame-time gain is smaller. Turn on **GPU timers** (Diagnostics) and the overlay shows the measured NR time next to the forecast. Or measure with PresentMon or CapFrameX, and tell us what you get.
 
 ## Presets
 
-Paste into `ReShade.ini`, section `[RenoDX.DLSS5]`. These are for 7680×2160; for other screens, take the row from the table below.
+Paste into `ReShade.ini`, section `[RenoDX.DLSS5]`, or set the same values with the sliders. Heights are the same on every display; take the width pair for your aspect ratio.
 
-**Balanced:** NR everywhere you'd look, outer band off:
+| Preset | Centre height | Contour height | Centre width (16:9 / 21:9 / 32:9) | Contour width (16:9 / 21:9 / 32:9) | Contour res. | Vertical pos. |
+|---|---|---|---|---|---|---|
+| Balanced | 60 | 30 | 67 / 50 / 34 | 33 / 42 / 28 | 0.50 | 50 |
+| Racing | 45 | 25 | 56 / 42 / 28 | 44 / 38 / 25 | 0.50 | 62 |
+| Aggressive | 40 | 25 | 45 / 33 / 23 | 45 / 34 / 22 | 0.35 | 60 |
+
+All presets use the default fall-off (50 %) and fade (25 %).
+
+**Racing on 32:9 (Forza Horizon, BeamNG.drive, rally):** low zones, roof and sky off, NR on 26 % of the pixels:
 ```ini
 NRResolutionScale=1
 NRFollowInputRes=0
 NRFoveation=1
-NRFoveationWidth=2590
-NRFoveationHeight=1300
-NRFoveationMidWidth=4750
-NRFoveationMidHeight=1940
-NRFoveationFalloff=260
-NRFoveationEdge=0.5
-NRFoveationCenterY=50
-```
-
-**Racing (Forza Horizon, BeamNG.drive, rally):** low zones, roof and sky off:
-```ini
-NRFoveationWidth=2160
-NRFoveationHeight=970
-NRFoveationMidWidth=4100
-NRFoveationMidHeight=1510
-NRFoveationFalloff=220
+NRFoveationCenterW=28
+NRFoveationCenterH=45
+NRFoveationContourW=25
+NRFoveationContourH=25
 NRFoveationEdge=0.5
 NRFoveationCenterY=62
 ```
 
-**Aggressive:** maximum frames:
-```ini
-NRFoveationWidth=1730
-NRFoveationHeight=860
-NRFoveationMidWidth=3460
-NRFoveationMidHeight=1400
-NRFoveationFalloff=170
-NRFoveationEdge=0.35
-NRFoveationCenterY=60
-```
-
-| Preset | Display | Centre W×H | Midpoint W×H | Fall-off | Midpoint res. | Vertical pos. |
-|---|---|---|---|---|---|---|
-| Balanced | 3840×2160 | 2590×1300 | 3840×1940 | 260 | 0.50 | 50 |
-| Balanced | 3440×1440 / 5120×1440 | 1730×860 | 3170×1300 | 170 | 0.50 | 50 |
-| Racing | 3840×2160 | 2160×970 | 3840×1510 | 220 | 0.50 | 62 |
-| Racing | 3440×1440 / 5120×1440 | 1440×650 | 2740×1010 | 140 | 0.50 | 62 |
-| Aggressive | 3840×2160 | 1730×860 | 3460×1400 | 170 | 0.35 | 60 |
-| Aggressive | 3440×1440 / 5120×1440 | 1150×580 | 2300×940 | 120 | 0.35 | 60 |
-
-The racing presets put the zone's middle at 62 % of the screen height. Watch the overlay readout and nudge `NRFoveationCenterY` until the top of the midpoint zone sits just above the horizon.
+With **Show zones on screen** on, nudge the vertical position until the top of the amber contour sits just above the horizon.
 
 ## How it works
 
 DLSS 5 NR runs at one fixed resolution per evaluation, so the add-on can't hand it a mixed-resolution image. Instead it **squeezes** the frame before NR and **stretches** NR's result back:
 
 - **Centre zone:** pixels are kept 1:1 at the centre resolution (`NRResolutionScale`).
-- **Fall-off:** resolution blends smoothly (smoothstep, no visible seam) down to the midpoint resolution.
-- **Midpoint zone:** resolution stays at the midpoint value. Horizontal and vertical are independent.
-- **Beyond the midpoint zone:** nothing. The squeezed image simply doesn't contain it, and the final image keeps the game's own pixels there, with NR fading in over a soft blend.
+- **Fall-off:** resolution blends smoothly (smoothstep, no visible seam) down to the contour resolution.
+- **Contour:** resolution stays at the contour value. Horizontal and vertical are independent.
+- **Edge, beyond the contour:** nothing. The squeezed image simply doesn't contain it, and the final image keeps the game's own pixels there, with NR fading in over a soft blend.
 - NR runs **once** on the small image, with one temporal history. The game's depth and motion vectors are squeezed the same way, so NR's inputs stay aligned.
 - Multi-pass NR stacking works as before: every pass uses the same zones.
 
@@ -136,24 +114,27 @@ ReShade overlay → **Add-ons** → **DLSS 5 Neural Rendering**. The foveation c
 | Overlay | `ReShade.ini` key | Default | What it does |
 |---|---|---|---|
 | Foveated resolution | `NRFoveation` | `0` | `1` turns foveation on. Greyed out when NR runs before upscaling. |
-| Centre width / height | `NRFoveationWidth` / `NRFoveationHeight` | `3000` / `1800` | Size of the full-resolution centre zone, in **screen pixels**. |
-| Centre vertical position | `NRFoveationCenterY` | `50` | Where the zones sit vertically, in %: `0` top, `50` middle, `100` bottom. |
-| Centre horizontal position | `NRFoveationCenterX` | `50` | `0` left, `50` middle, `100` right. |
-| Fall-off | `NRFoveationFalloff` | `400` | Distance in screen pixels over which resolution blends from the centre to the midpoint value. `0` is a hard step. |
-| Midpoint resolution | `NRFoveationEdge` | `0.50` | Resolution of the midpoint zone relative to the centre, per direction. Range 0.25–1.00. |
-| Midpoint zone width / height | `NRFoveationMidWidth` / `NRFoveationMidHeight` | `16384` | Size of the midpoint zone, centred on the same position. **Beyond it NR is off.** The screen size or more = NR everywhere (the classic v0.1 behaviour, and the default). |
-| Off-zone blend | `NRFoveationBlend` | `96` | How far inside the midpoint zone NR fades in, so the border to the game's own image is soft. |
+| Zone map | — | — | Your screen in its aspect ratio with the zones as they run: teal centre, amber contour, dark edge. |
+| NR saving | — | — | The forecast: how much NR work the layout removes and how the screen splits. With GPU timers on, also the measured NR time with and without foveation. |
+| Centre width / height | `NRFoveationCenterW` / `NRFoveationCenterH` | `50` / `50` | The full-resolution centre zone, in **% of the screen**. |
+| Contour width / height | `NRFoveationContourW` / `NRFoveationContourH` | `25` / `25` | Thickness added around the centre at the contour resolution, in % of the screen, both sides together (25 = 12.5 % per side). It can't exceed what the centre leaves. |
+| Edge (NR off) | — | — | Read-only: what's left (100 − centre − contour). NR is off there and you see the game's own image. |
+| Vertical / horizontal position | `NRFoveationCenterY` / `NRFoveationCenterX` | `50` / `50` | Where the zones sit, in %: `0` top/left, `50` middle, `100` bottom/right. |
+| Contour resolution | `NRFoveationEdge` | `0.50` | Resolution of the contour relative to the centre, per direction. Range 0.25–1.00. |
+| Resolution fall-off | `NRFoveationFalloffPct` | `50` | How gradually resolution steps from the centre to the contour value, in % of the contour's thickness. `0` is a hard step. |
+| Fade to the edge | `NRFoveationBlendPct` | `25` | How far inside the contour NR fades out toward the edge, in % of the contour's thickness. |
+| Show zones on screen | `NRFoveationPreview` | `1` | Outlines the zones over the game: `0` off, `1` while the overlay is open, `2` always (tune while you drive). Drawing only; NR's image is untouched. |
 
-The **readout** under the sliders shows what you actually get: the effective zones in pixels, the fall-off that fits, the midpoint value reached, and the share of NR pixels left. Tune with it open.
+**Built-in safeguards:**
 
-**Built-in safeguards.** Sizes are in screen pixels, so one setting works on any display. Every frame they're checked against the real output:
-
-- The **midpoint zone is never smaller than the centre zone**, nor smaller than 10 % of the screen. It's shifted (never shrunk) to stay on screen, and the centre zone always sits inside it.
-- A **zone pushed past an edge** stops flush with that edge. Positions snap to whole pixels.
+- **Centre + contour + edge = 100 %, always.** The contour slider only goes as far as the centre leaves, and growing the centre takes the room from the contour. What the sliders show is what runs.
+- The centre is never smaller than 10 % of the screen.
+- A **zone pushed past an edge** stops flush with that edge. Positions snap to whole pixels, and the map shows where the zones really are.
 - **Out-of-range `ReShade.ini` values** are clamped, and broken values fall back to the defaults.
-- A **fall-off longer than the space left** is cut off by the zone's edge. The readout shows the value actually reached.
-- **Saving under 5 %:** foveation switches itself off for that resolution, because the extra passes would cost more than they save.
-- **Your stored values are never overwritten**, so settings made for a larger display come back when you return to it.
+- **Saving under 5 %:** foveation switches itself off for that resolution, because the extra passes would cost more than they save. The forecast says so.
+- Sizes are percentages, so one setting fits every display.
+
+**Upgrading from v0.3 or earlier:** the pixel keys (`NRFoveationWidth`, `NRFoveationMidWidth`, ...) are no longer read. When you switch foveation on, you start from the default layout.
 
 ### Settings that interact with foveation
 
@@ -167,9 +148,10 @@ The **readout** under the sliders shows what you actually get: the effective zon
 
 ### Tuning tips
 
-- **Cut what you never look at first.** Shrinking the midpoint zone (roof, sky, far edges) saves more than lowering resolutions.
-- **Then shrink the centre**, then lower the midpoint resolution. 0.25–0.35 is where edits can start to look softer in your peripheral vision. Check in motion, not on stills.
-- **A longer fall-off and blend** hide the transitions better but save less.
+- **Turn on Show zones on screen first.** You see exactly what each slider does.
+- **Cut what you never look at first.** A bigger edge (roof, sky, far edges) saves more than lowering resolutions.
+- **Then shrink the centre**, then lower the contour resolution. 0.25–0.35 is where edits can start to look softer in your peripheral vision. Check in motion, not on stills.
+- **A longer fall-off and fade** hide the transitions better but save less.
 - **Expect a brief shimmer while dragging a zone slider.** Moving or resizing a zone resets NR's temporal history, and a size change also rebuilds NR after about half a second.
 
 ## On the roadmap
@@ -180,15 +162,15 @@ The **readout** under the sliders shows what you actually get: the effective zon
 ## Checking that it works
 
 - `ReShade.log` contains a line like:
-  `foveated NR active: working 3240x1350 for output 7680x2160 (centre 2160x970 at 3840,1339, midpoint zone x 1790-5890 y 584-2094, fall-off on screen 219/220 px, edge density 0.5/0.5, 26% of the NR pixels)` (the Racing preset)
-- The add-on's **Diagnostics** section shows the reduced **Working resolution**.
+  `foveated NR active: working 3350x1310 for output 7680x2160 (centre ..., midpoint zone ..., 26% of the NR pixels)` (the Racing preset)
+- The overlay's **NR saving** row shows the forecast, and **Working at** shows the reduced working resolution.
 - Compare frame times with foveation on and off (PresentMon or CapFrameX), not average FPS.
 
 ## Limits
 
 - After-upscale placement only. When NR runs before upscaling, it uses the normal uniform resolution.
 - Changing foveation settings resets NR's temporal history.
-- NR changes the look (lighting, texture, colour), so the border to the off zone is a change of look, not just of sharpness. The blend softens it; size the midpoint zone so the border falls where you don't look.
+- NR changes the look (lighting, texture, colour), so the border to the off zone is a change of look, not just of sharpness. The fade softens it; size the contour so the border falls where you don't look.
 - If the game's depth or motion-vector format can't be read, the frame still runs, but with unaligned inputs: edits outside the centre may smear. The log says so once.
 - New overlay text is English only.
 

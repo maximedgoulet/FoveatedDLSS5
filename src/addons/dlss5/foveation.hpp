@@ -4,12 +4,13 @@
 //
 // The NR model is same-resolution, so "foveated" means a separable warp of
 // the working image: per axis, density 1 inside the centre zone, a smoothstep
-// fall-off over `falloff` pixels, and `edge` beyond it.  Centre W x H and the
-// fall-off are given in OUTPUT pixels and clamped against the actual output
-// each frame, so one setting works at any resolution: an axis whose centre
-// covers the whole screen is simply not warped.  Corners get edge x edge.
+// fall-off over `falloff` pixels, and `edge` beyond it.  The player gives
+// shares of the screen (Params); SizeAxis turns them into OUTPUT pixels for
+// the running output, so one setting works at any resolution: an axis whose
+// centre covers the whole screen is simply not warped.  Corners get
+// edge x edge.
 //
-// Dual foveation (Params::mid_width/height): beyond a midpoint zone NR is
+// Dual foveation (Params::contour_w/h): beyond a midpoint zone NR is
 // off entirely - the working image covers only the zone, and the resolve
 // keeps the game's pixels outside it.  Distances then run from c to the
 // zone's bounds [m0, m1] instead of the screen edges (foveation.hlsli).
@@ -54,23 +55,28 @@ inline constexpr float kMaxEdge = 1.f;
 // than the NR pixels they remove: the grid stands down to uniform.
 inline constexpr double kMinSaving = 0.05;
 
-// Player settings, in output pixels.
+// Player settings, as shares of the screen so one setting fits any display
+// and no combination can contradict itself.  Per axis the screen splits into
+// centre + contour + off = 100 %: the contour is a THICKNESS added around the
+// centre (both sides together), so the midpoint zone (centre + contour) can
+// never be smaller than the centre, and what is left is the NR-off edge.
 struct Params {
-  uint32_t center_width = 3000;
-  uint32_t center_height = 1800;
-  uint32_t falloff = 400;  // the same length on all four sides
-  float edge = 0.5f;       // midpoint density beyond the fall-off, per axis
+  float center_w = 0.5f;    // centre zone, share of the screen width
+  float center_h = 0.5f;    // ... and height
+  float contour_w = 0.25f;  // contour thickness, both sides together
+  float contour_h = 0.25f;
+  // Fall-off: how much of the contour's per-side thickness the resolution
+  // takes to step from the centre value to the midpoint value (0 = a hard
+  // step at the centre zone's border).  Blend: how much of it NR takes to
+  // fade out into the off zone.
+  float falloff = 0.5f;
+  float blend = 0.25f;
+  float edge = 0.5f;  // midpoint resolution per axis, relative to the centre
   // Where the centre zone sits, 0..1 across the screen (0 = left / top,
-  // 0.5 = middle, 1 = right / bottom).  Clamped per frame so the zone stays
+  // 0.5 = middle, 1 = right / bottom).  Clamped per frame so the zones stay
   // on screen.
   float center_x = 0.5f;
   float center_y = 0.5f;
-  // Dual foveation: the midpoint zone, centred on the same position.  NR is
-  // off beyond it (the game's pixels, faded in over `blend`).  At or above
-  // the screen size nothing is off: the single-zone foveation of v0.2.
-  uint32_t mid_width = 16384;
-  uint32_t mid_height = 16384;
-  uint32_t blend = 96;
   // Outer limits for the midpoint zone, 0..1 per axis (auto-trim); the whole
   // screen when unset.
   float limit_x0 = 0.f;
@@ -78,6 +84,47 @@ struct Params {
   float limit_y0 = 0.f;
   float limit_y1 = 1.f;
 };
+
+// The centre zone is never smaller than this share of an axis.
+inline constexpr float kMinCenterShare = 0.1f;
+
+// A share from a setting: non-finite means the fallback, then clamped.
+inline float SafeShare(float value, float lo, float hi, float fallback) {
+  return std::clamp(std::isfinite(value) ? value : fallback, lo, hi);
+}
+
+// One axis of Params in output pixels, the units MakeAxis works in.
+struct AxisSizes {
+  uint32_t center = 0;
+  uint32_t mid = 0xFFFFFFFFu;  // whole axis: nothing off
+  uint32_t falloff = 0;
+  uint32_t blend = 0;
+  float center_share = 1.f;   // effective shares (after the clamps)
+  float contour_share = 0.f;
+  float off_share = 0.f;
+};
+
+inline AxisSizes SizeAxis(uint32_t full, float center, float contour, float falloff,
+                          float blend) {
+  AxisSizes s;
+  const float c = SafeShare(center, kMinCenterShare, 1.f, 0.5f);
+  const float k = SafeShare(contour, 0.f, 1.f - c, 0.25f);
+  s.center_share = c;
+  s.contour_share = k;
+  s.off_share = std::max(0.f, 1.f - c - k);
+  const double f = static_cast<double>(full);
+  s.center = static_cast<uint32_t>(std::lround(c * f));
+  const uint32_t contour_px = static_cast<uint32_t>(std::lround(k * f));
+  // Under one pixel of off zone per side is no off zone.
+  if (s.center + contour_px + 2u <= full) s.mid = s.center + contour_px;
+  else s.off_share = 0.f;
+  const double side = 0.5 * contour_px;
+  s.falloff = static_cast<uint32_t>(std::lround(SafeShare(falloff, 0.f, 1.f, 0.5f) * side));
+  // A thin contour still gets a usable fade (2 % of the axis).
+  s.blend = static_cast<uint32_t>(
+      std::lround(SafeShare(blend, 0.f, 1.f, 0.25f) * std::max(side, 0.02 * f)));
+  return s;
+}
 
 // A trimmed axis never shrinks below this share of the screen: a limit pair
 // closer than that is ignored (whole screen).
@@ -280,12 +327,14 @@ inline Grid MakeGrid(bool enabled, const Params& params, uint32_t full_width,
   if (!enabled) {
     reason = Inactive::kOff;
   } else {
-    grid.x = MakeAxis(full_width, params.center_width, params.falloff, params.edge,
-                      params.center_x, params.mid_width, params.blend, params.limit_x0,
-                      params.limit_x1);
-    grid.y = MakeAxis(full_height, params.center_height, params.falloff, params.edge,
-                      params.center_y, params.mid_height, params.blend, params.limit_y0,
-                      params.limit_y1);
+    const AxisSizes sx = SizeAxis(full_width, params.center_w, params.contour_w,
+                                  params.falloff, params.blend);
+    const AxisSizes sy = SizeAxis(full_height, params.center_h, params.contour_h,
+                                  params.falloff, params.blend);
+    grid.x = MakeAxis(full_width, sx.center, sx.falloff, params.edge, params.center_x,
+                      sx.mid, sx.blend, params.limit_x0, params.limit_x1);
+    grid.y = MakeAxis(full_height, sy.center, sy.falloff, params.edge, params.center_y,
+                      sy.mid, sy.blend, params.limit_y0, params.limit_y1);
     if (!grid.active()) {
       reason = Inactive::kCentreCoversScreen;
     } else if (grid.PixelFactor() > 1.0 - kMinSaving) {

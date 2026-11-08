@@ -1354,27 +1354,28 @@ inline constexpr uint32_t kFeedMode = 0;
 inline constexpr float kPassStrength = 1.f;
 inline constexpr bool kFollowInputRes = false;
 inline constexpr float kResolutionScale = 1.f;
-// Foveated NR (after-upscale path): off by default.  A 3000 x 1800 output-
-// pixel centre at full density, a 400 px smoothstep fall-off on all four
-// sides, half density (per axis) beyond.  Clamped per output resolution.
+// Foveated NR (after-upscale path): off by default.  Sizes are percent of
+// the screen per axis: centre + contour + off = 100 (foveation::Params).
+// Turned on, the stock layout is a centre half the screen wide and high at
+// full resolution, a contour of 25 points around it at the midpoint
+// resolution (12.5 % per side), and NR off on the last 25 points.
 inline constexpr bool kFoveation = false;
-inline constexpr uint32_t kFoveationWidth = 3000;
-inline constexpr uint32_t kFoveationHeight = 1800;
-inline constexpr uint32_t kFoveationFalloff = 400;
+inline constexpr float kFoveationCenterW = 50.f;
+inline constexpr float kFoveationCenterH = 50.f;
+inline constexpr float kFoveationContourW = 25.f;
+inline constexpr float kFoveationContourH = 25.f;
+// Percent of the contour's per-side thickness: the resolution step from the
+// centre to the midpoint value, and NR's fade into the off zone.
+inline constexpr float kFoveationFalloffPct = 50.f;
+inline constexpr float kFoveationBlendPct = 25.f;
 inline constexpr float kFoveationEdge = 0.5f;
 // Where the centre zone sits, in percent of the screen (50 = middle; Y: 0 top,
 // 100 bottom).  A racing game might use Y 60-65 to cover the dashboard.
 inline constexpr float kFoveationCenterX = 50.f;
 inline constexpr float kFoveationCenterY = 50.f;
-// Dual foveation: the midpoint zone (NR at the midpoint resolution) around
-// the centre zone; NR is off beyond it.  The screen size or more = nothing
-// off (v0.2 behaviour), so the default changes nothing.  `Blend` fades NR in
-// at the zone's border.
-inline constexpr uint32_t kFoveationMidWidth = 16384;
-inline constexpr uint32_t kFoveationMidHeight = 16384;
-inline constexpr uint32_t kFoveationBlend = 96;
-// Config/overlay bounds for the pixel settings (the output clamps further).
-inline constexpr uint32_t kFoveationMaxPixels = 16384;
+// Zone outlines over the game: 0 off, 1 while ReShade's overlay is open,
+// 2 always (tuning while driving).
+inline constexpr uint32_t kFoveationPreview = 1;
 inline constexpr uint32_t kToggleHotkey = VK_F6;
 inline constexpr uint32_t kScreenshotHotkey = VK_F5;
 // Per-stage GPU timestamp diagnostics around the injected chain
@@ -1553,15 +1554,18 @@ inline std::atomic<float> nr_resolution_scale = defaults::kResolutionScale;
 // fall-off of `falloff` pixels on every side, `edge` beyond - and NR runs
 // once on it with warped guides.  Pre-SR keeps the uniform grid.
 inline std::atomic_bool nr_foveation = defaults::kFoveation;
-inline std::atomic_uint32_t nr_foveation_width = defaults::kFoveationWidth;
-inline std::atomic_uint32_t nr_foveation_height = defaults::kFoveationHeight;
-inline std::atomic_uint32_t nr_foveation_falloff = defaults::kFoveationFalloff;
+inline std::atomic<float> nr_foveation_center_w = defaults::kFoveationCenterW;
+inline std::atomic<float> nr_foveation_center_h = defaults::kFoveationCenterH;
+inline std::atomic<float> nr_foveation_contour_w = defaults::kFoveationContourW;
+inline std::atomic<float> nr_foveation_contour_h = defaults::kFoveationContourH;
+inline std::atomic<float> nr_foveation_falloff_pct = defaults::kFoveationFalloffPct;
+inline std::atomic<float> nr_foveation_blend_pct = defaults::kFoveationBlendPct;
 inline std::atomic<float> nr_foveation_edge = defaults::kFoveationEdge;
 inline std::atomic<float> nr_foveation_center_x = defaults::kFoveationCenterX;
 inline std::atomic<float> nr_foveation_center_y = defaults::kFoveationCenterY;
-inline std::atomic_uint32_t nr_foveation_mid_width = defaults::kFoveationMidWidth;
-inline std::atomic_uint32_t nr_foveation_mid_height = defaults::kFoveationMidHeight;
-inline std::atomic_uint32_t nr_foveation_blend = defaults::kFoveationBlend;
+inline std::atomic_uint32_t nr_foveation_preview = defaults::kFoveationPreview;
+// The smallest centre zone the settings accept, percent of an axis.
+inline constexpr float kFoveationMinCenterPct = foveation::kMinCenterShare * 100.f;
 
 // The grid for an output of width x height (uniform when off, when the
 // centre covers the screen, or when it would save under 5% of the NR
@@ -1571,15 +1575,15 @@ inline foveation::Grid CurrentFoveation(
     uint32_t width, uint32_t height, foveation::Inactive* why = nullptr) {
   return foveation::MakeGrid(
       nr_foveation.load(),
-      {.center_width = nr_foveation_width.load(),
-       .center_height = nr_foveation_height.load(),
-       .falloff = nr_foveation_falloff.load(),
+      {.center_w = nr_foveation_center_w.load() / 100.f,
+       .center_h = nr_foveation_center_h.load() / 100.f,
+       .contour_w = nr_foveation_contour_w.load() / 100.f,
+       .contour_h = nr_foveation_contour_h.load() / 100.f,
+       .falloff = nr_foveation_falloff_pct.load() / 100.f,
+       .blend = nr_foveation_blend_pct.load() / 100.f,
        .edge = nr_foveation_edge.load(),
        .center_x = nr_foveation_center_x.load() / 100.f,
-       .center_y = nr_foveation_center_y.load() / 100.f,
-       .mid_width = nr_foveation_mid_width.load(),
-       .mid_height = nr_foveation_mid_height.load(),
-       .blend = nr_foveation_blend.load()},
+       .center_y = nr_foveation_center_y.load() / 100.f},
       width, height, why);
 }
 // An overlay resolution commit arms this so the next evaluation applies the
@@ -14399,6 +14403,164 @@ inline void OnHudOverlay(reshade::api::effect_runtime* /*runtime*/) {
   ImGui::End();
 }
 
+// ---- Foveation zone map --------------------------------------------------
+// The three zones over a rectangle standing for the output: the panel's
+// thumbnail, and the outlines over the game (OnZonePreviewOverlay).  Drawn
+// from the effective axes the frame uses - after every clamp - so what is
+// shown is what runs.
+
+// One axis, normalized: the centre zone, the midpoint (contour) zone, and
+// where the fall-off reaches the midpoint resolution.
+struct ZoneSpan {
+  float c0 = 0.f, c1 = 1.f;
+  float m0 = 0.f, m1 = 1.f;
+  float f0 = 0.f, f1 = 1.f;
+  bool ramp = false;
+};
+
+inline ZoneSpan ZoneAxisSpan(const foveation::Axis& axis, uint32_t full) {
+  ZoneSpan s;
+  const double f = static_cast<double>((std::max)(full, 1u));
+  const double pos = axis.position_px / f;
+  const double half = 0.5 * axis.center_px / f;
+  s.m0 = static_cast<float>(axis.mid_lo_px / f);
+  s.m1 = static_cast<float>(axis.mid_hi_px / f);
+  s.c0 = static_cast<float>(std::clamp(pos - half, static_cast<double>(s.m0), 1.0));
+  s.c1 = static_cast<float>(std::clamp(pos + half, 0.0, static_cast<double>(s.m1)));
+  s.f0 = s.c0;
+  s.f1 = s.c1;
+  if (axis.packed != 0u) {
+    const foveation::Decoded p = foveation::Decode(axis.packed);
+    if (p.b > 0.0) {
+      const double reach = 0.5 * (p.a + p.b);
+      s.f0 = static_cast<float>((std::max)(axis.center - reach, static_cast<double>(s.m0)));
+      s.f1 = static_cast<float>((std::min)(axis.center + reach, static_cast<double>(s.m1)));
+      s.ramp = true;
+    }
+  }
+  return s;
+}
+
+// Shares of the screen's area: centre, contour (midpoint zone minus the
+// centre) and off.
+struct ZoneAreas {
+  double centre = 1.0;
+  double contour = 0.0;
+  double off = 0.0;
+};
+
+inline ZoneAreas ZoneAreaShares(const foveation::Grid& grid, uint32_t w, uint32_t h) {
+  const ZoneSpan x = ZoneAxisSpan(grid.x, w);
+  const ZoneSpan y = ZoneAxisSpan(grid.y, h);
+  ZoneAreas a;
+  a.centre = static_cast<double>(x.c1 - x.c0) * (y.c1 - y.c0);
+  const double mid = static_cast<double>(x.m1 - x.m0) * (y.m1 - y.m0);
+  a.contour = (std::max)(0.0, mid - a.centre);
+  a.off = (std::max)(0.0, 1.0 - mid);
+  return a;
+}
+
+inline constexpr ImU32 kZoneCentre = IM_COL32(76, 166, 160, 255);   // ui accent
+inline constexpr ImU32 kZoneContour = IM_COL32(245, 166, 35, 255);  // ui warn
+inline constexpr ImU32 kZoneShadow = IM_COL32(0, 0, 0, 200);
+
+inline void ZoneText(ImDrawList* draw, ImVec2 at, ImU32 colour, const char* text) {
+  draw->AddText(ImVec2(at.x + 1.f, at.y + 1.f), kZoneShadow, text, nullptr);
+  draw->AddText(at, colour, text, nullptr);
+}
+
+inline void DrawZoneMap(ImDrawList* draw, ImVec2 p0, ImVec2 size, const foveation::Grid& grid,
+                        foveation::Inactive why, uint32_t w, uint32_t h, bool thumbnail) {
+  const ZoneSpan sx = ZoneAxisSpan(grid.x, w);
+  const ZoneSpan sy = ZoneAxisSpan(grid.y, h);
+  const auto at = [&](float nx, float ny) {
+    return ImVec2(p0.x + nx * size.x, p0.y + ny * size.y);
+  };
+  const ImVec2 p1 = at(1.f, 1.f);
+  const ImVec2 m0 = at(sx.m0, sy.m0);
+  const ImVec2 m1 = at(sx.m1, sy.m1);
+  const ImVec2 c0 = at(sx.c0, sy.c0);
+  const ImVec2 c1 = at(sx.c1, sy.c1);
+  const bool has_off = sx.m0 > 0.f || sx.m1 < 1.f || sy.m0 > 0.f || sy.m1 < 1.f;
+  if (thumbnail) {
+    draw->AddRectFilled(p0, p1, IM_COL32(28, 30, 34, 255), 0.f, 0);  // NR off
+    draw->AddRectFilled(m0, m1, IM_COL32(245, 166, 35, 80), 0.f, 0);
+    draw->AddRectFilled(c0, c1, IM_COL32(76, 166, 160, 190), 0.f, 0);
+  } else if (has_off) {
+    // Dim what NR leaves alone: the four bands around the midpoint zone.
+    const ImU32 dim = IM_COL32(0, 0, 0, 115);
+    draw->AddRectFilled(p0, ImVec2(p1.x, m0.y), dim, 0.f, 0);
+    draw->AddRectFilled(ImVec2(p0.x, m1.y), p1, dim, 0.f, 0);
+    draw->AddRectFilled(ImVec2(p0.x, m0.y), ImVec2(m0.x, m1.y), dim, 0.f, 0);
+    draw->AddRectFilled(ImVec2(m1.x, m0.y), ImVec2(p1.x, m1.y), dim, 0.f, 0);
+  }
+  const float line = thumbnail ? 1.f : 2.f;
+  if (sx.ramp || sy.ramp) {
+    draw->AddRect(at(sx.f0, sy.f0), at(sx.f1, sy.f1), IM_COL32(245, 166, 35, 120), 0.f, 0,
+                  1.f);
+  }
+  if (has_off) draw->AddRect(m0, m1, kZoneContour, 0.f, 0, line);
+  draw->AddRect(c0, c1, kZoneCentre, 0.f, 0, line);
+  if (thumbnail) {
+    draw->AddRect(p0, p1, IM_COL32(110, 118, 129, 255), 0.f, 0, 1.f);
+    return;
+  }
+  // Labels, and a caption with the forecast at the top of the screen.
+  const float pad = 6.f;
+  ZoneText(draw, ImVec2(c0.x + pad, c0.y + pad), kZoneCentre, "CENTRE  full resolution");
+  char text[192];
+  std::snprintf(text, sizeof(text), "CONTOUR  x%.2f resolution", nr_foveation_edge.load());
+  if (has_off && c0.y - m0.y > 2.f * pad + ImGui::GetFontSize()) {
+    ZoneText(draw, ImVec2(m0.x + pad, m0.y + pad), kZoneContour, text);
+  } else if (has_off || sx.ramp || sy.ramp) {
+    ZoneText(draw, ImVec2(c0.x + pad, c1.y + pad), kZoneContour, text);
+  }
+  if (has_off) {
+    const float font = ImGui::GetFontSize();
+    ImVec2 off_at(p0.x + pad, p0.y + pad);
+    if (m0.y - p0.y > font + 2.f * pad) {
+      off_at = ImVec2(m0.x + pad, (p0.y + m0.y - font) * 0.5f);
+    } else if (p1.y - m1.y > font + 2.f * pad) {
+      off_at = ImVec2(m0.x + pad, (m1.y + p1.y - font) * 0.5f);
+    } else if (m0.x - p0.x > 8.f * font) {
+      off_at = ImVec2(p0.x + pad, (m0.y + m1.y) * 0.5f);
+    }
+    ZoneText(draw, off_at, IM_COL32(235, 235, 235, 255), "NR OFF  game image");
+  }
+  if (why == foveation::Inactive::kNone) {
+    const double factor = grid.PixelFactor();
+    std::snprintf(text, sizeof(text),
+                  "DLSS 5 NR zones  |  NR on %.0f%% of the full-screen pixels: %.0f%% less"
+                  " work (%.1fx)",
+                  factor * 100.0, (1.0 - factor) * 100.0, 1.0 / (std::max)(factor, 0.01));
+  } else {
+    std::snprintf(text, sizeof(text), "DLSS 5 NR zones  |  foveation inactive: %s",
+                  why == foveation::Inactive::kCentreCoversScreen
+                      ? "the centre covers the screen"
+                      : "it would save under 5%");
+  }
+  const ImVec2 caption = ImGui::CalcTextSize(text, nullptr, false, -1.f);
+  const ImVec2 box0((p0.x + p1.x - caption.x) * 0.5f - pad, p0.y + pad);
+  const ImVec2 box1(box0.x + caption.x + 2.f * pad, box0.y + caption.y + 2.f * pad);
+  draw->AddRectFilled(box0, box1, IM_COL32(20, 22, 26, 215), 4.f, 0);
+  draw->AddText(ImVec2(box0.x + pad, box0.y + pad), IM_COL32(232, 234, 237, 255), text,
+                nullptr);
+}
+
+// The outlines over the game, from ReShade's overlay pass (OnPresent listens
+// while NRFoveationPreview asks for them).  The background list: behind
+// every ImGui window, the panel included, and over the game.
+inline void OnZonePreviewOverlay(reshade::api::effect_runtime* /*runtime*/) {
+  const uint32_t out_w = last_output_width.load();
+  const uint32_t out_h = last_output_height.load();
+  const ImVec2 display = ImGui::GetIO().DisplaySize;
+  if (out_w == 0 || out_h == 0 || display.x < 16.f || display.y < 16.f) return;
+  foveation::Inactive why = foveation::Inactive::kNone;
+  const foveation::Grid grid = CurrentFoveation(out_w, out_h, &why);
+  DrawZoneMap(ImGui::GetBackgroundDrawList(nullptr), ImVec2(0.f, 0.f), display, grid, why,
+              out_w, out_h, false);
+}
+
 // `force` emits regardless of how much of the window has elapsed: the
 // session's last telemetry line, from Shutdown().  Everything the verdict
 // does not carry - the tracker, the shadow, the hook entry tallies - lives
@@ -14792,11 +14954,13 @@ inline void EmitTelemetry(int64_t now_ns, bool force = false) {
                  : logged_pre_sr_rr.load() ? "pre-SR (after for RR)"
                                            : "pre-SR")
              << " resolution_scale=" << nr_resolution_scale.load()
-             << " foveation=" << nr_foveation.load() << ':' << nr_foveation_width.load()
-             << 'x' << nr_foveation_height.load() << '/' << nr_foveation_falloff.load()
-             << '/' << nr_foveation_edge.load() << '@' << nr_foveation_center_x.load()
-             << ',' << nr_foveation_center_y.load() << " mid=" << nr_foveation_mid_width.load()
-             << 'x' << nr_foveation_mid_height.load() << '/' << nr_foveation_blend.load()
+             << " foveation=" << nr_foveation.load() << ":centre "
+             << nr_foveation_center_w.load() << 'x' << nr_foveation_center_h.load()
+             << "% contour " << nr_foveation_contour_w.load() << 'x'
+             << nr_foveation_contour_h.load() << "% falloff "
+             << nr_foveation_falloff_pct.load() << "% blend " << nr_foveation_blend_pct.load()
+             << "% midpoint " << nr_foveation_edge.load() << " @"
+             << nr_foveation_center_x.load() << ',' << nr_foveation_center_y.load()
              << " follow_input=" << nr_follow_input_res.load()
              << " look=" << look_mode.load() << " stabilize=" << look_stabilize.load()
              << " upsample=" << look_upsample.load() << " codec=" << codec_mode.load()
@@ -14993,6 +15157,14 @@ inline void OnPresent(
                    || present_ns < hud_toast_until_ns.load(std::memory_order_relaxed)),
            OnHudOverlay);
     listen(&hotkeys_listening, overlay_open, OnOverlayHotkeys);
+    // The foveation zones over the game (NRFoveationPreview).
+    static std::atomic_bool zones_listening{false};
+    const uint32_t zone_preview = nr_foveation_preview.load(std::memory_order_relaxed);
+    listen(&zones_listening,
+           nr_foveation.load(std::memory_order_relaxed)
+               && !nr_before_upscale.load(std::memory_order_relaxed)
+               && (zone_preview == 2u || (zone_preview == 1u && overlay_open)),
+           OnZonePreviewOverlay);
     // A dock whose tab-select frame never came (the overlay closed first)
     // is done: the next open must not pull this tab to the front.
     if (!overlay_open) {
@@ -15341,14 +15513,23 @@ inline constexpr Setting kSetResolutionScale{
 // FeatureState::foveation), so no effect is needed here.
 inline constexpr Setting kSetFoveation{
     "NRFoveation", &nr_foveation, defaults::kFoveation, SettingEffect::kNone};
-inline constexpr Setting kSetFoveationWidth{
-    "NRFoveationWidth", &nr_foveation_width, defaults::kFoveationWidth,
+inline constexpr Setting kSetFoveationCenterW{
+    "NRFoveationCenterW", &nr_foveation_center_w, defaults::kFoveationCenterW,
     SettingEffect::kNone};
-inline constexpr Setting kSetFoveationHeight{
-    "NRFoveationHeight", &nr_foveation_height, defaults::kFoveationHeight,
+inline constexpr Setting kSetFoveationCenterH{
+    "NRFoveationCenterH", &nr_foveation_center_h, defaults::kFoveationCenterH,
     SettingEffect::kNone};
-inline constexpr Setting kSetFoveationFalloff{
-    "NRFoveationFalloff", &nr_foveation_falloff, defaults::kFoveationFalloff,
+inline constexpr Setting kSetFoveationContourW{
+    "NRFoveationContourW", &nr_foveation_contour_w, defaults::kFoveationContourW,
+    SettingEffect::kNone};
+inline constexpr Setting kSetFoveationContourH{
+    "NRFoveationContourH", &nr_foveation_contour_h, defaults::kFoveationContourH,
+    SettingEffect::kNone};
+inline constexpr Setting kSetFoveationFalloffPct{
+    "NRFoveationFalloffPct", &nr_foveation_falloff_pct, defaults::kFoveationFalloffPct,
+    SettingEffect::kNone};
+inline constexpr Setting kSetFoveationBlendPct{
+    "NRFoveationBlendPct", &nr_foveation_blend_pct, defaults::kFoveationBlendPct,
     SettingEffect::kNone};
 inline constexpr Setting kSetFoveationEdge{
     "NRFoveationEdge", &nr_foveation_edge, defaults::kFoveationEdge, SettingEffect::kNone};
@@ -15358,14 +15539,9 @@ inline constexpr Setting kSetFoveationCenterX{
 inline constexpr Setting kSetFoveationCenterY{
     "NRFoveationCenterY", &nr_foveation_center_y, defaults::kFoveationCenterY,
     SettingEffect::kNone};
-inline constexpr Setting kSetFoveationMidWidth{
-    "NRFoveationMidWidth", &nr_foveation_mid_width, defaults::kFoveationMidWidth,
+inline constexpr Setting kSetFoveationPreview{
+    "NRFoveationPreview", &nr_foveation_preview, defaults::kFoveationPreview,
     SettingEffect::kNone};
-inline constexpr Setting kSetFoveationMidHeight{
-    "NRFoveationMidHeight", &nr_foveation_mid_height, defaults::kFoveationMidHeight,
-    SettingEffect::kNone};
-inline constexpr Setting kSetFoveationBlend{
-    "NRFoveationBlend", &nr_foveation_blend, defaults::kFoveationBlend, SettingEffect::kNone};
 
 // Lowering the pass count must free the retired passes' NR feature handles;
 // raising it starts the new passes from clean temporal state.  The per-pass
@@ -15633,10 +15809,10 @@ inline constexpr const Setting* kLookResultSettings[] = {
     &kSetLookStabilizeDetail};
 inline constexpr const Setting* kPerformanceSettings[] = {
     &kSetPreSr,           &kSetFollowInputRes, &kSetResolutionScale,
-    &kSetFoveation,       &kSetFoveationWidth, &kSetFoveationHeight,
-    &kSetFoveationFalloff, &kSetFoveationEdge, &kSetFoveationCenterX,
-    &kSetFoveationCenterY, &kSetFoveationMidWidth, &kSetFoveationMidHeight,
-    &kSetFoveationBlend, &kSetLookUpsample};
+    &kSetFoveation,       &kSetFoveationCenterW, &kSetFoveationCenterH,
+    &kSetFoveationContourW, &kSetFoveationContourH, &kSetFoveationFalloffPct,
+    &kSetFoveationBlendPct, &kSetFoveationEdge, &kSetFoveationCenterX,
+    &kSetFoveationCenterY, &kSetFoveationPreview, &kSetLookUpsample};
 inline constexpr const Setting* kStackingSettings[] = {
     &kSetStackPasses,     &kSetPassIntensity[0], &kSetPassIntensity[1],
     &kSetPassIntensity[2], &kSetPassTransfer[0], &kSetPassTransfer[1],
@@ -16185,6 +16361,118 @@ inline void ResolutionResetButton(const char* id) {
   }
 }
 
+// ---- Foveation panel rows -------------------------------------------------
+// Centre + contour for one axis.  Per axis the screen is centre + contour +
+// edge = 100 %: the contour's range is what the centre leaves, and a centre
+// that grows takes the room from the contour, so no combination is invalid
+// and the sliders always show what runs.  A contour clamped while the centre
+// is dragged is written with it, on release.
+inline const Setting* foveation_contour_unsaved[2] = {nullptr, nullptr};
+
+inline void FoveationAxisSliders(const ui::PanelText& text, int axis, const Setting& centre,
+                                 const Setting& contour, const char* centre_label,
+                                 const char* centre_tip, const char* contour_label,
+                                 const char* contour_tip) {
+  SliderSetting(text, centre, centre_label, kFoveationMinCenterPct, 100.f, "%.0f%%",
+                centre_tip);
+  const float room = (std::max)(0.f, 100.f - centre.Get());
+  if (contour.Get() > room + 1e-3f) {
+    contour.Store(room);
+    foveation_contour_unsaved[axis] = &contour;
+  }
+  if (foveation_contour_unsaved[axis] != nullptr && !ImGui::IsMouseDown(0)) {
+    foveation_contour_unsaved[axis]->Persist();
+    foveation_contour_unsaved[axis] = nullptr;
+  }
+  if (room >= 1.f) {
+    SliderSetting(text, contour, contour_label, 0.f, room, "%.0f%%", contour_tip);
+  } else if (text.modern) {
+    ui::RowLabel(contour_label, contour_tip);
+    ImGui::TextDisabled("%s", ui::Tr("none: the centre fills the screen"));
+  }
+}
+
+// The zone map: the screen in its aspect, teal the centre, amber the
+// contour, dark where NR is off.
+inline void DrawFoveationMap(const ui::PanelText& text, const foveation::Grid& grid,
+                             foveation::Inactive why, uint32_t w, uint32_t h) {
+  constexpr const char* kMapTip =
+      "Your screen with the zones as they run: teal the centre at full"
+      " resolution, amber the contour at the contour resolution, dark the edge"
+      " where Neural Rendering is off.  The thin amber line is where the"
+      " fall-off reaches the contour resolution.  Turn on Show zones on screen to"
+      " see them over the game.";
+  float avail = ImGui::GetContentRegionAvail().x;
+  if (text.modern) {
+    ui::RowLabel("Zone map", kMapTip);
+    avail = ImGui::CalcItemWidth();
+  }
+  const float font = ImGui::GetFontSize();
+  const float aspect = static_cast<float>(h) / static_cast<float>((std::max)(w, 1u));
+  float width = (std::min)(avail, font * 20.f);
+  float height = width * aspect;
+  if (height > font * 9.f) {
+    height = font * 9.f;
+    width = height / aspect;
+  }
+  const ImVec2 p0 = ImGui::GetCursorScreenPos();
+  DrawZoneMap(ImGui::GetWindowDrawList(), p0, ImVec2(width, height), grid, why, w, h, true);
+  ImGui::Dummy(ImVec2(width, height));
+  if (!text.modern) ui::ItemTooltip("%s", kMapTip);
+}
+
+// The forecast: the share of a full-screen NR pass that still runs, the
+// screen split, and milliseconds when the GPU timers measure them.
+inline void DrawFoveationForecast(const ui::PanelText& text, const foveation::Grid& grid,
+                                  foveation::Inactive why, uint32_t w, uint32_t h) {
+  constexpr const char* kForecastTip =
+      "Neural Rendering's work is proportional to the pixels it runs on.  The"
+      " saving is the share of a full-screen NR pass this layout removes; NR's"
+      " fixed costs and the rest of the frame stay, so the frame-rate gain is"
+      " smaller.  With GPU timers on (Diagnostics), the measured NR time and"
+      " what it would be without foveation.";
+  if (text.modern) {
+    ui::RowLabel("NR saving", kForecastTip);
+  } else {
+    ImGui::TextUnformatted("NR saving:");  // i18n: skip (Developer view)
+    ImGui::SameLine();
+  }
+  if (why != foveation::Inactive::kNone) {
+    ImGui::TextColored(ui::tokens::kWarn, ui::Tr("none: foveation is inactive (%s)"),
+                       ui::Tr(why == foveation::Inactive::kCentreCoversScreen
+                                  ? "the centre covers the screen"
+                                  : "it would save under 5%"));
+    return;
+  }
+  const double factor = grid.PixelFactor();
+  ImGui::TextColored(ui::tokens::kGood, ui::Tr("%.0f%% less NR work (%.1fx)"),
+                     (1.0 - factor) * 100.0, 1.0 / (std::max)(factor, 0.01));
+  const ZoneAreas areas = ZoneAreaShares(grid, w, h);
+  if (text.modern) ui::RowLabel("");
+  {
+    ui::StyleScope muted;
+    muted.Color(ImGuiCol_Text, ui::tokens::kTextSecondary);
+    ImGui::TextWrapped(ui::Tr("NR runs on %.0f%% of the pixels.  Screen: centre %.0f%%,"
+                              " contour %.0f%%, edge (off) %.0f%%."),
+                       factor * 100.0, areas.centre * 100.0, areas.contour * 100.0,
+                       areas.off * 100.0);
+  }
+  uint32_t eval_us = 0;
+  if (gpu_timers_enabled.load()) {
+    RuntimeLock lock(runtime_mutex);
+    if (gpu_timers::stats.valid) eval_us = gpu_timers::stats.eval_us;
+  }
+  if (text.modern) ui::RowLabel("");
+  if (eval_us != 0) {
+    const double ms = eval_us / 1000.0;
+    ImGui::TextWrapped(ui::Tr("Measured: NR %.1f ms per frame, about %.1f ms without"
+                              " foveation (saving %.1f ms)."),
+                       ms, ms / factor, ms / factor - ms);
+  } else {
+    ImGui::TextDisabled("%s", ui::Tr("Turn on GPU timers (Diagnostics) to see milliseconds."));
+  }
+}
+
 inline void DrawSectionStackingResolution(const ui::PanelText& text) {
   // NR insertion point.  After (default): NR runs on the game's finished DLSS
   // output at display resolution - correct whenever the game feeds DLSS a
@@ -16359,109 +16647,120 @@ inline void DrawSectionStackingResolution(const ui::PanelText& text) {
       " change on the edges it belongs to; Classic is the upsampling of"
       " earlier versions.");
   // Foveated resolution (foveation.hpp): after-upscale only.  The centre zone
-  // keeps the resolution above; outside it each axis falls to Edge along a
-  // smoothstep over the fall-off.  Sizes are output pixels: the slider ranges
-  // follow the running output, and every frame clamps them again, so one
-  // setting is valid at any resolution.
+  // keeps the resolution above, the contour around it runs at the contour
+  // resolution, and NR is off on the edge beyond.  Sizes are percent of the
+  // screen (centre + contour + edge = 100 per axis), so one setting is valid
+  // at any resolution and no combination contradicts itself.
   {
     const bool was_foveated = nr_foveation.load();
     ImGui::BeginDisabled(nr_before_upscale.load());
     ToggleSetting(
         text, kSetFoveation, "Foveated resolution",
-        "After upscaling only.  Keeps the resolution above inside a centre"
-        " zone and lowers it toward every screen edge, so Neural Rendering"
-        " costs less.  Sizes are in screen pixels and adapt to any display.");
+        "After upscaling only.  Three zones: a centre at the resolution above,"
+        " a contour around it at a lower resolution, and the edge, where Neural"
+        " Rendering is off.  Sizes are percent of the screen, so they fit any"
+        " display.");
     if (nr_foveation.load() != was_foveated) nr_resolution_commit_now = true;
     if (nr_foveation.load()) {
-      // Ranges from the running output; before the first frame, generous
-      // defaults (the evaluate clamps regardless).
       const uint32_t out_w = last_output_width.load();
       const uint32_t out_h = last_output_height.load();
-      const float max_w = static_cast<float>(out_w != 0 ? out_w : 7680u);
-      const float max_h = static_cast<float>(out_h != 0 ? out_h : 4320u);
-      const float max_falloff = std::max(max_w, max_h) * 0.5f;
-      // A stored value above the running output (set on a larger display)
-      // is kept as is - the evaluate clamps it and the readout below shows
-      // the effective size - so switching displays never loses a setting.
-      SliderSetting(
-          text, kSetFoveationWidth, "Centre width", 0.f, max_w, "%.0f px",
-          "Width of the full-resolution centre zone, in screen pixels.");
-      SliderSetting(
-          text, kSetFoveationHeight, "Centre height", 0.f, max_h, "%.0f px",
-          "Height of the full-resolution centre zone, in screen pixels.  At the"
-          " full screen height only the sides are lowered.");
-      SliderSetting(
-          text, kSetFoveationCenterY, "Centre vertical position", 0.f, 100.f, "%.0f%%",
-          "Where the centre zone sits vertically: 0% top, 50% middle, 100% bottom."
-          "  Lower it to keep a dashboard or cockpit sharp and give the sky less."
-          "  The zone always stays on screen: a position past the edge is held at"
-          " the edge (see the readout below).");
-      SliderSetting(
-          text, kSetFoveationCenterX, "Centre horizontal position", 0.f, 100.f, "%.0f%%",
-          "Where the centre zone sits horizontally: 0% left, 50% middle, 100% right."
-          "  The zone always stays on screen.");
-      SliderSetting(
-          text, kSetFoveationFalloff, "Fall-off", 0.f, max_falloff, "%.0f px",
-          "Distance over which the resolution blends from the centre to the"
-          " edge value, on every side.  0 is a hard step.  Longer than the"
-          " space to the screen edge simply never reaches the edge value.");
-      SliderSetting(
-          text, kSetFoveationEdge, "Midpoint resolution", foveation::kMinEdge,
-          foveation::kMaxEdge, "%.2f",
-          "Resolution of the midpoint zone, beyond the fall-off, per axis,"
-          " relative to the centre resolution (the Resolution above; 0.50 ="
-          " half; its corners get both).");
-      // Dual foveation: the third zone.  Ranges up to the output; at the full
-      // size nothing is off.
-      SliderSetting(
-          text, kSetFoveationMidWidth, "Midpoint zone width", 0.f, max_w, "%.0f px",
-          "Width of the midpoint zone around the centre zone.  Beyond it Neural"
-          " Rendering is off and you see the game's own image.  The full screen"
-          " width keeps NR everywhere (no off zone).  Never smaller than the"
-          " centre zone.");
-      SliderSetting(
-          text, kSetFoveationMidHeight, "Midpoint zone height", 0.f, max_h, "%.0f px",
-          "Height of the midpoint zone.  In cockpit views, cut the roof and the"
-          " sky above the windshield: they cost as much as anything else.");
-      SliderSetting(
-          text, kSetFoveationBlend, "Off-zone blend", 0.f, 512.f, "%.0f px",
-          "How far inside the midpoint zone Neural Rendering fades in, so the"
-          " border to the game's own image is soft.  No effect where the zone"
-          " reaches the screen edge.");
-      if (out_w != 0 && out_h != 0) {
-        // What the running output actually gets.
-        foveation::Inactive why = foveation::Inactive::kNone;
-        const foveation::Grid grid = CurrentFoveation(out_w, out_h, &why);
-        const foveation::Axis ax = foveation::MakeAxis(
-            out_w, nr_foveation_width.load(), nr_foveation_falloff.load(),
-            nr_foveation_edge.load(), nr_foveation_center_x.load() / 100.f,
-            nr_foveation_mid_width.load(), nr_foveation_blend.load());
-        const foveation::Axis ay = foveation::MakeAxis(
-            out_h, nr_foveation_height.load(), nr_foveation_falloff.load(),
-            nr_foveation_edge.load(), nr_foveation_center_y.load() / 100.f,
-            nr_foveation_mid_height.load(), nr_foveation_blend.load());
-        char effective[288];
-        if (why == foveation::Inactive::kNone) {
-          // The position shown is the clamped one: what the frame really uses.
-          std::snprintf(
-              effective, sizeof(effective),
-              "%ux%u: centre %ux%u at %.0f%%/%.0f%%, midpoint zone %ux%u (x %u-%u,"
-              " y %u-%u), fall-off %u/%u px, midpoint %.2f/%.2f, %.0f%% of the NR"
-              " pixels",
-              out_w, out_h, ax.center_px, ay.center_px, ax.center * 100.0,
-              ay.center * 100.0, ax.mid_hi_px - ax.mid_lo_px, ay.mid_hi_px - ay.mid_lo_px,
-              ax.mid_lo_px, ax.mid_hi_px, ay.mid_lo_px, ay.mid_hi_px, ax.falloff_px,
-              ay.falloff_px, ax.edge_reached, ay.edge_reached,
-              grid.PixelFactor() * 100.0);
+      const bool live = out_w != 0 && out_h != 0;
+      // Before the first frame a 4K stand-in, so the map and the forecast
+      // still show the layout.
+      const uint32_t map_w = live ? out_w : 3840u;
+      const uint32_t map_h = live ? out_h : 2160u;
+      foveation::Inactive why = foveation::Inactive::kNone;
+      const foveation::Grid grid = CurrentFoveation(map_w, map_h, &why);
+      DrawFoveationMap(text, grid, why, map_w, map_h);
+      DrawFoveationForecast(text, grid, why, map_w, map_h);
+      FoveationAxisSliders(
+          text, 0, kSetFoveationCenterW, kSetFoveationContourW, "Centre width",
+          "Width of the full-resolution centre zone, in percent of the screen width.",
+          "Contour width",
+          "Width added around the centre zone at the contour resolution, in percent"
+          " of the screen width, both sides together (25% = 12.5% per side).  What"
+          " the centre and the contour leave is the edge, where Neural Rendering is"
+          " off.");
+      FoveationAxisSliders(
+          text, 1, kSetFoveationCenterH, kSetFoveationContourH, "Centre height",
+          "Height of the full-resolution centre zone, in percent of the screen"
+          " height.",
+          "Contour height",
+          "Height added around the centre zone at the contour resolution, in"
+          " percent of the screen height, both sides together.  In cockpit views a"
+          " small value cuts the roof and the sky.");
+      {
+        const float off_w = (std::max)(
+            0.f, 100.f - nr_foveation_center_w.load() - nr_foveation_contour_w.load());
+        const float off_h = (std::max)(
+            0.f, 100.f - nr_foveation_center_h.load() - nr_foveation_contour_h.load());
+        constexpr const char* kEdgeTip =
+            "What is left of the screen after the centre and the contour: Neural"
+            " Rendering is off there and you see the game's own image.  Grow the"
+            " centre or the contour to shrink it.";
+        char edge[96];
+        if (off_w < 0.5f && off_h < 0.5f) {
+          std::snprintf(edge, sizeof(edge), "%s", "none: NR everywhere");
         } else {
-          std::snprintf(
-              effective, sizeof(effective), "%ux%u: inactive (%s)", out_w, out_h,
-              why == foveation::Inactive::kCentreCoversScreen
-                  ? "the centre covers the screen"
-                  : "would save under 5% - not worth the extra pass");
+          std::snprintf(edge, sizeof(edge), "%.0f%% of the width, %.0f%% of the height",
+                        off_w, off_h);
         }
         if (text.modern) {
-          ui::RowLabel("Foveation");
+          ui::RowLabel("Edge (NR off)", kEdgeTip);
+          ImGui::TextUnformatted(edge);
+        } else {
+          ImGui::Text("Edge (NR off): %s", edge);  // i18n: skip (Developer view)
+        }
+      }
+      SliderSetting(
+          text, kSetFoveationCenterY, "Vertical position", 0.f, 100.f, "%.0f%%",
+          "Where the zones sit vertically: 0% top, 50% middle, 100% bottom."
+          "  Lower them to keep a dashboard or cockpit sharp and give the sky less."
+          "  The zones always stay on screen: a position past the edge is held at"
+          " the edge (the map shows where they really are).");
+      SliderSetting(
+          text, kSetFoveationCenterX, "Horizontal position", 0.f, 100.f, "%.0f%%",
+          "Where the zones sit horizontally: 0% left, 50% middle, 100% right."
+          "  The zones always stay on screen.");
+      SliderSetting(
+          text, kSetFoveationEdge, "Contour resolution", foveation::kMinEdge,
+          foveation::kMaxEdge, "%.2f",
+          "Resolution of the contour, per axis, relative to the centre resolution"
+          " (the Resolution above; 0.50 = half per axis, a quarter of the pixels).");
+      SliderSetting(
+          text, kSetFoveationFalloffPct, "Resolution fall-off", 0.f, 100.f, "%.0f%%",
+          "How gradually the resolution steps down from the centre to the contour,"
+          " in percent of the contour's thickness.  0% is a hard step at the"
+          " centre's border; 100% ramps across the whole contour.");
+      SliderSetting(
+          text, kSetFoveationBlendPct, "Fade to the edge", 0.f, 100.f, "%.0f%%",
+          "How far inside the contour Neural Rendering fades out toward the edge,"
+          " in percent of the contour's thickness, so the border to the game's own"
+          " image is soft.");
+      constexpr const char* kPreviewModes[] = {"Off", "Menu open", "Always"};
+      ChoiceSetting(
+          text, kSetFoveationPreview, "Show zones on screen", kPreviewModes,
+          "Outlines the zones over the game: teal the centre, amber the contour,"
+          " darkened where Neural Rendering is off, with the saving at the top."
+          "  Menu open draws them while this overlay is open; Always also while"
+          " you play, to tune in motion.  Drawing only: no effect on the image"
+          " Neural Rendering produces.");
+      if (live) {
+        // The pixel figures the running output actually gets.
+        const foveation::Axis& ax = grid.x;
+        const foveation::Axis& ay = grid.y;
+        char effective[256];
+        std::snprintf(
+            effective, sizeof(effective),
+            "%ux%u: centre %ux%u px, contour zone %ux%u px (x %u-%u, y %u-%u),"
+            " fall-off %u/%u px",
+            out_w, out_h, ax.center_px, ay.center_px, ax.mid_hi_px - ax.mid_lo_px,
+            ay.mid_hi_px - ay.mid_lo_px, ax.mid_lo_px, ax.mid_hi_px, ay.mid_lo_px,
+            ay.mid_hi_px, ax.falloff_px, ay.falloff_px);
+        if (text.modern) {
+          ui::RowLabel("In pixels");
+          ui::StyleScope muted;
+          muted.Color(ImGuiCol_Text, ui::tokens::kTextSecondary);
           ImGui::TextWrapped("%s", effective);
         } else {
           ImGui::TextWrapped("Foveation at %s", effective);  // i18n: skip (Developer view)
@@ -17278,15 +17577,16 @@ inline std::string BuildSupportReport() {
          << " NRFollowInputRes=" << nr_follow_input_res.load()
          << " NRResolutionScale=" << nr_resolution_scale.load()
          << " NRFoveation=" << nr_foveation.load()
-         << " NRFoveationWidth=" << nr_foveation_width.load()
-         << " NRFoveationHeight=" << nr_foveation_height.load()
-         << " NRFoveationFalloff=" << nr_foveation_falloff.load()
+         << " NRFoveationCenterW=" << nr_foveation_center_w.load()
+         << " NRFoveationCenterH=" << nr_foveation_center_h.load()
+         << " NRFoveationContourW=" << nr_foveation_contour_w.load()
+         << " NRFoveationContourH=" << nr_foveation_contour_h.load()
+         << " NRFoveationFalloffPct=" << nr_foveation_falloff_pct.load()
+         << " NRFoveationBlendPct=" << nr_foveation_blend_pct.load()
          << " NRFoveationEdge=" << nr_foveation_edge.load()
          << " NRFoveationCenterX=" << nr_foveation_center_x.load()
          << " NRFoveationCenterY=" << nr_foveation_center_y.load()
-         << " NRFoveationMidWidth=" << nr_foveation_mid_width.load()
-         << " NRFoveationMidHeight=" << nr_foveation_mid_height.load()
-         << " NRFoveationBlend=" << nr_foveation_blend.load()
+         << " NRFoveationPreview=" << nr_foveation_preview.load()
          << " EnableHooks="
          << (!hooks_enabled.load() ? 0 : streamline_hooks_enabled.load() ? 1 : 2)
          << " DX11Source="
@@ -18516,39 +18816,51 @@ inline void LoadConfiguration() {
       saved_res_scale, defaults::kResolutionScale, 0.33f, 1.f,
       "NRResolutionScale");
   {
-    // Foveated NR (foveation.hpp).
+    // Foveated NR (foveation.hpp).  Every size is percent of the screen;
+    // the pixel keys of v0.1-v0.3 (NRFoveationWidth, ...MidWidth, ...) are
+    // no longer read.
     bool saved_foveation = defaults::kFoveation;
-    uint32_t saved_width = defaults::kFoveationWidth;
-    uint32_t saved_height = defaults::kFoveationHeight;
-    uint32_t saved_falloff = defaults::kFoveationFalloff;
+    float saved_center_w = defaults::kFoveationCenterW;
+    float saved_center_h = defaults::kFoveationCenterH;
+    float saved_contour_w = defaults::kFoveationContourW;
+    float saved_contour_h = defaults::kFoveationContourH;
+    float saved_falloff = defaults::kFoveationFalloffPct;
+    float saved_blend = defaults::kFoveationBlendPct;
     float saved_edge = defaults::kFoveationEdge;
     float saved_center_x = defaults::kFoveationCenterX;
     float saved_center_y = defaults::kFoveationCenterY;
-    uint32_t saved_mid_width = defaults::kFoveationMidWidth;
-    uint32_t saved_mid_height = defaults::kFoveationMidHeight;
-    uint32_t saved_blend = defaults::kFoveationBlend;
+    uint32_t saved_preview = defaults::kFoveationPreview;
     reshade::get_config_value(nullptr, kConfigSection, "NRFoveation", saved_foveation);
-    reshade::get_config_value(nullptr, kConfigSection, "NRFoveationWidth", saved_width);
-    reshade::get_config_value(nullptr, kConfigSection, "NRFoveationHeight", saved_height);
-    reshade::get_config_value(nullptr, kConfigSection, "NRFoveationFalloff", saved_falloff);
+    reshade::get_config_value(nullptr, kConfigSection, "NRFoveationCenterW", saved_center_w);
+    reshade::get_config_value(nullptr, kConfigSection, "NRFoveationCenterH", saved_center_h);
+    reshade::get_config_value(nullptr, kConfigSection, "NRFoveationContourW", saved_contour_w);
+    reshade::get_config_value(nullptr, kConfigSection, "NRFoveationContourH", saved_contour_h);
+    reshade::get_config_value(nullptr, kConfigSection, "NRFoveationFalloffPct", saved_falloff);
+    reshade::get_config_value(nullptr, kConfigSection, "NRFoveationBlendPct", saved_blend);
     reshade::get_config_value(nullptr, kConfigSection, "NRFoveationEdge", saved_edge);
     reshade::get_config_value(nullptr, kConfigSection, "NRFoveationCenterX", saved_center_x);
     reshade::get_config_value(nullptr, kConfigSection, "NRFoveationCenterY", saved_center_y);
-    reshade::get_config_value(nullptr, kConfigSection, "NRFoveationMidWidth", saved_mid_width);
-    reshade::get_config_value(nullptr, kConfigSection, "NRFoveationMidHeight", saved_mid_height);
-    reshade::get_config_value(nullptr, kConfigSection, "NRFoveationBlend", saved_blend);
+    reshade::get_config_value(nullptr, kConfigSection, "NRFoveationPreview", saved_preview);
     nr_foveation = saved_foveation;
-    // Pixel values are only bounded here; the output resolution clamps them
-    // every frame (foveation::MakeAxis), so one setting serves any display.
-    nr_foveation_width = SanitizeEnumKey(
-        saved_width, defaults::kFoveationWidth, 0u, defaults::kFoveationMaxPixels,
-        "NRFoveationWidth");
-    nr_foveation_height = SanitizeEnumKey(
-        saved_height, defaults::kFoveationHeight, 0u, defaults::kFoveationMaxPixels,
-        "NRFoveationHeight");
-    nr_foveation_falloff = SanitizeEnumKey(
-        saved_falloff, defaults::kFoveationFalloff, 0u, defaults::kFoveationMaxPixels,
-        "NRFoveationFalloff");
+    nr_foveation_center_w = SanitizeFloatKey(
+        saved_center_w, defaults::kFoveationCenterW, kFoveationMinCenterPct, 100.f,
+        "NRFoveationCenterW");
+    nr_foveation_center_h = SanitizeFloatKey(
+        saved_center_h, defaults::kFoveationCenterH, kFoveationMinCenterPct, 100.f,
+        "NRFoveationCenterH");
+    // Centre + contour never exceed the screen: the contour gives way.
+    nr_foveation_contour_w = std::min(
+        SanitizeFloatKey(saved_contour_w, defaults::kFoveationContourW, 0.f, 100.f,
+                         "NRFoveationContourW"),
+        100.f - nr_foveation_center_w.load());
+    nr_foveation_contour_h = std::min(
+        SanitizeFloatKey(saved_contour_h, defaults::kFoveationContourH, 0.f, 100.f,
+                         "NRFoveationContourH"),
+        100.f - nr_foveation_center_h.load());
+    nr_foveation_falloff_pct = SanitizeFloatKey(
+        saved_falloff, defaults::kFoveationFalloffPct, 0.f, 100.f, "NRFoveationFalloffPct");
+    nr_foveation_blend_pct = SanitizeFloatKey(
+        saved_blend, defaults::kFoveationBlendPct, 0.f, 100.f, "NRFoveationBlendPct");
     nr_foveation_edge = SanitizeFloatKey(
         saved_edge, defaults::kFoveationEdge, foveation::kMinEdge, foveation::kMaxEdge,
         "NRFoveationEdge");
@@ -18558,16 +18870,8 @@ inline void LoadConfiguration() {
         saved_center_x, defaults::kFoveationCenterX, 0.f, 100.f, "NRFoveationCenterX");
     nr_foveation_center_y = SanitizeFloatKey(
         saved_center_y, defaults::kFoveationCenterY, 0.f, 100.f, "NRFoveationCenterY");
-    // Pixel bounds only; MakeAxis keeps the midpoint zone between the centre
-    // zone and the screen every frame.
-    nr_foveation_mid_width = SanitizeEnumKey(
-        saved_mid_width, defaults::kFoveationMidWidth, 0u, defaults::kFoveationMaxPixels,
-        "NRFoveationMidWidth");
-    nr_foveation_mid_height = SanitizeEnumKey(
-        saved_mid_height, defaults::kFoveationMidHeight, 0u, defaults::kFoveationMaxPixels,
-        "NRFoveationMidHeight");
-    nr_foveation_blend = SanitizeEnumKey(
-        saved_blend, defaults::kFoveationBlend, 0u, 4096u, "NRFoveationBlend");
+    nr_foveation_preview = SanitizeEnumKey(
+        saved_preview, defaults::kFoveationPreview, 0u, 2u, "NRFoveationPreview");
   }
   gpu_timers_enabled = saved_gpu_timers;
   edit_trace_enabled = saved_edit_trace;
@@ -19340,6 +19644,8 @@ inline void Use(DWORD reason, HMODULE module, LPVOID reserved) {
           internal::OnHudOverlay);
       reshade::unregister_event<reshade::addon_event::reshade_overlay>(
           internal::OnOverlayHotkeys);
+      reshade::unregister_event<reshade::addon_event::reshade_overlay>(
+          internal::OnZonePreviewOverlay);
       reshade::unregister_event<reshade::addon_event::reshade_overlay>(
           internal::OnDockOverlayWindow);
       if (!internal::issue_report::test_reason.empty()) {

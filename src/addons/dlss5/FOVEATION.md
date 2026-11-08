@@ -7,9 +7,11 @@ Patch on top of RenoDX-DLSS5-Generic `main` (v7.5.0-rc5). After-upscale path onl
 DLSSNR is a same-resolution network, so it cannot take a per-pixel resolution.
 This mode warps the working image instead, separately on each axis:
 
-- density 1 (relative to `NRResolutionScale`) inside a centre zone of W × H **output pixels**,
-- a smoothstep fall-off of `Fall-off` pixels on every side (C1-continuous density, no seam),
-- `Edge` density beyond it (per axis, so corners get Edge × Edge).
+- density 1 (relative to `NRResolutionScale`) inside a centre zone,
+- a smoothstep fall-off (C1-continuous density, no seam) to the contour density `NRFoveationEdge`
+  (per axis, so corners get Edge × Edge),
+- beyond the contour (the midpoint zone), nothing: NR is off and the resolve keeps the game's pixels,
+  faded in over a soft blend.
 
 NR runs **once** on the warped image, with one temporal history. Depth and
 motion vectors are resampled onto the same warped grid by a compute pass
@@ -19,31 +21,51 @@ look upsample, look temporal reprojection, transport footprint) goes through
 `FovWarp` / `FovUnwarp` in `shaders/foveation.hlsli`. With the mode off, every
 mapping is bit-identical to stock.
 
-## Resolution handling
+## Zones in percent
 
-Sizes are output pixels and are clamped against the running output every frame:
+Per axis the screen splits into **centre + contour + edge = 100 %**
+(`foveation::Params`, `SizeAxis`):
 
-- a centre wider/taller than the screen disables that axis (only the other axis is foveated),
-- a fall-off longer than the space to the edge keeps its length and is cut by the
-  screen edge (the edge value is then not reached; the overlay shows what is),
+- the centre is a share of the axis (10–100 %),
+- the contour is a *thickness* added around the centre, both sides together, so
+  the midpoint zone (centre + contour) can never be smaller than the centre and
+  never larger than the screen: the contour's range is what the centre leaves,
+  and a growing centre takes the room from the contour,
+- the edge is what is left, where NR is off,
+- the fall-off and the blend are shares of the contour's per-side thickness
+  (the blend has a floor of 2 % of the axis so a thin contour still fades).
+
+`SizeAxis` turns the shares into output pixels for the running output, and
+`MakeAxis` applies the remaining safeguards every frame:
+
+- a zone pushed past a screen edge is held flush with it (the midpoint zone is
+  shifted, never shrunk) and the position snaps to whole pixels,
 - if the result would save under 5 % of the NR pixels, the grid stands down to
   uniform: the guide pass would cost more than it saves,
-- stored values are never rewritten by a smaller display; switching back restores them.
+- non-finite or out-of-range settings fall back to the defaults or are clamped.
 
-The overlay sliders range up to the running output, and a readout shows the
-effective centre, fall-off, edge density and NR-pixel share at that output.
+The overlay shows a zone map (the screen in its aspect, the zones as they run),
+the NR saving forecast (share of a full-screen NR pass, screen split, and the
+measured NR time with and without foveation when the GPU timers are on), and
+can outline the zones over the game (`NRFoveationPreview`, drawn on ImGui's
+background list from ReShade's overlay pass; drawing only).
 
 ## Settings (ReShade.ini `[RenoDX.DLSS5]`, or the overlay)
 
 | Key | Default | Meaning |
 |---|---|---|
 | `NRFoveation` | 0 | 1 = on |
-| `NRFoveationWidth` | 3000 | centre zone width, output px |
-| `NRFoveationHeight` | 1800 | centre zone height, output px |
-| `NRFoveationFalloff` | 400 | fall-off length on every side, output px |
-| `NRFoveationEdge` | 0.50 | density beyond the fall-off, per axis (0.25–1.0) |
+| `NRFoveationCenterW` / `NRFoveationCenterH` | 50 / 50 | centre zone, % of the width / height |
+| `NRFoveationContourW` / `NRFoveationContourH` | 25 / 25 | contour thickness, % of the width / height, both sides together |
+| `NRFoveationFalloffPct` | 50 | resolution fall-off, % of the contour's per-side thickness |
+| `NRFoveationBlendPct` | 25 | NR fade into the edge, % of the contour's per-side thickness |
+| `NRFoveationEdge` | 0.50 | contour density, per axis (0.25–1.0) |
 | `NRFoveationCenterX` | 50 | zone centre, % of the width (0 left, 100 right) |
 | `NRFoveationCenterY` | 50 | zone centre, % of the height (0 top, 100 bottom) |
+| `NRFoveationPreview` | 1 | zone outlines over the game: 0 off, 1 while the overlay is open, 2 always |
+
+The pixel keys of v0.1–v0.3 (`NRFoveationWidth`, `NRFoveationMidWidth`, ...)
+are no longer read.
 
 Off-centre zones measure distance from the zone's centre c, so each axis has
 two sides of different length; the shaders get c in the per-axis float that
@@ -53,18 +75,11 @@ moved centre is a new grid (history reset, working size re-derived).
 
 Use with `NRResolutionScale=1`, `NRFollowInputRes=0` for a 100 % centre.
 
-## Defaults across displays (from `foveation.hpp`)
+## Default layout
 
-| Output | Effective centre | Fall-off on screen (H/V) | Edge reached (H/V) | NR grid | NR pixels |
-|---|---|---|---|---|---|
-| 7680×2160 | 3000×1800 | 400/180 px | 0.50/0.79 | 5540×2132 | 71 % |
-| 5120×2160 | 3000×1800 | 400/180 px | 0.50/0.79 | 4260×2132 | 82 % |
-| 5160×1400 | 3000×1400 | 400/0 px | 0.50/— | 4280×1400 | 83 % |
-| 3840×2160 | 3000×1800 | 400/180 px | 0.50/0.79 | 3620×2132 | 93 % |
-| 3440×1440 | 3000×1440 | 220/0 px | 0.71/— | — | bypassed (saves <5 %) |
-
-A 3000×1800 centre is most of a 4K or 3440×1440 screen; scale it down there
-(2000×1100 gives 69 % NR pixels at 4K, 83 % at 3440×1440).
+50 % centre + 25 % contour + 25 % edge on both axes, contour at 0.50:
+NR runs on **43 %** of the full-screen pixels (2.3×) at every aspect ratio
+(3840×2160 → 2520×1418 working grid; 7680×2160 → 5041×1418).
 
 ## Performance notes
 
