@@ -9,6 +9,11 @@
 // each frame, so one setting works at any resolution: an axis whose centre
 // covers the whole screen is simply not warped.  Corners get edge x edge.
 //
+// Dual foveation (Params::mid_width/height): beyond a midpoint zone NR is
+// off entirely - the working image covers only the zone, and the resolve
+// keeps the game's pixels outside it.  Distances then run from c to the
+// zone's bounds [m0, m1] instead of the screen edges (foveation.hlsli).
+//
 // The centre zone can sit anywhere on each axis (Params::center_x/y, e.g.
 // lower for a racing game's dashboard).  Distances are measured from that
 // centre c, so the two sides of an axis have different lengths (2c and
@@ -23,6 +28,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <initializer_list>
 
 namespace foveation {
 
@@ -53,13 +59,30 @@ struct Params {
   uint32_t center_width = 3000;
   uint32_t center_height = 1800;
   uint32_t falloff = 400;  // the same length on all four sides
-  float edge = 0.5f;       // density beyond the fall-off, per axis
+  float edge = 0.5f;       // midpoint density beyond the fall-off, per axis
   // Where the centre zone sits, 0..1 across the screen (0 = left / top,
   // 0.5 = middle, 1 = right / bottom).  Clamped per frame so the zone stays
   // on screen.
   float center_x = 0.5f;
   float center_y = 0.5f;
+  // Dual foveation: the midpoint zone, centred on the same position.  NR is
+  // off beyond it (the game's pixels, faded in over `blend`).  At or above
+  // the screen size nothing is off: the single-zone foveation of v0.2.
+  uint32_t mid_width = 16384;
+  uint32_t mid_height = 16384;
+  uint32_t blend = 96;
+  // Outer limits for the midpoint zone, 0..1 per axis (auto-trim); the whole
+  // screen when unset.
+  float limit_x0 = 0.f;
+  float limit_x1 = 1.f;
+  float limit_y0 = 0.f;
+  float limit_y1 = 1.f;
 };
+
+// A trimmed axis never shrinks below this share of the screen: a limit pair
+// closer than that is ignored (whole screen).
+inline constexpr double kMinZoneExtent = 0.1;
+inline constexpr double kBoundsScale = 65535.0;
 
 // The exact values the shaders decode from one axis dword.
 struct Decoded {
@@ -70,10 +93,9 @@ struct Decoded {
 };
 
 // Integral of the density over [0, tau], tau = 2|n - c| (distance from the
-// zone's centre in half-screen units; up to 2 when the centre is off the
-// middle).  The fall-off may run past the screen edge: then the edge value is
-// never reached and the ramp is truncated, keeping its physical length at
-// every resolution.
+// zone's centre in half-screen units).  The fall-off may run past the zone's
+// edge: then the midpoint value is never reached and the ramp is truncated,
+// keeping its physical length at every resolution.
 inline double G(double tau, const Decoded& p) {
   if (tau <= p.a) return tau;
   const double ramp_end = p.a + p.b;
@@ -94,36 +116,73 @@ inline Decoded Decode(uint32_t packed) {
   return p;
 }
 
-// G(2c) + G(2 - 2c): the density integral over the whole axis, in
-// half-screen units.  Half of it is the mean density.
-inline double GTotal(double c, const Decoded& p) {
-  return G(2.0 * c, p) + G(2.0 - 2.0 * c, p);
+// [m0, m1] from the packed bounds the shaders get (0 = the whole axis).
+inline void DecodeBounds(uint32_t bounds, double* m0, double* m1) {
+  if (bounds == 0u) {
+    *m0 = 0.0;
+    *m1 = 1.0;
+    return;
+  }
+  *m0 = static_cast<double>(bounds & 0xFFFFu) / kBoundsScale;
+  *m1 = static_cast<double>(bounds >> 16) / kBoundsScale;
 }
 
-// One axis: the packed dword (0 = identity), the zone's centre c (the float
-// the shaders get beside the dword; they derive their normalizer from it)
-// and the mean density gmax, which sizes the working image.
+// G(2(c - m0)) + G(2(m1 - c)): the density integral over the working part of
+// the axis, in half-screen units.  Half of it is the mean density.
+inline double GTotal(double c, double m0, double m1, const Decoded& p) {
+  return G(2.0 * (c - m0), p) + G(2.0 * (m1 - c), p);
+}
+
+// One axis: the packed dword (0 = identity), the zone's centre c, the
+// midpoint bounds and the blend width (the values the shaders get beside the
+// dword), and the mean density gmax, which sizes the working image.
 struct Axis {
   uint32_t packed = 0;
   float center = 0.5f;
+  uint32_t bounds = 0;  // m0 | m1 << 16, /65535; 0 = whole axis (nothing off)
+  float blend = 0.f;    // NR-off fade width, normalized
   float gmax = 1.f;
   // Effective values at this output, for the overlay and the log.
   uint32_t center_px = 0;    // clamped centre extent
   uint32_t position_px = 0;  // where the zone's middle actually sits
-  uint32_t falloff_px = 0;   // fall-off on screen, on the longer side
-  float edge_reached = 1.f;  // density at the farther screen edge
+  uint32_t mid_lo_px = 0;    // midpoint zone [lo, hi) in output pixels
+  uint32_t mid_hi_px = 0;
+  uint32_t falloff_px = 0;   // fall-off inside the zone, on the longer side
+  float edge_reached = 1.f;  // density at the farther end of the zone
 };
 
 inline Axis MakeAxis(uint32_t full, uint32_t center, uint32_t falloff, float edge,
-                     float position = 0.5f) {
+                     float position = 0.5f, uint32_t mid = 0xFFFFFFFFu,
+                     uint32_t blend = 0u, float limit_lo = 0.f, float limit_hi = 1.f) {
   Axis axis;
-  axis.center_px = std::min(center, full);
   axis.position_px = full / 2u;
-  if (full < 16u || axis.center_px >= full) return axis;
-  const uint32_t e_code = static_cast<uint32_t>(
+  axis.mid_hi_px = full;
+  // Safeguards on the limits (auto-trim): finite, ordered, and never closer
+  // than kMinZoneExtent - otherwise the whole axis.
+  double l0 = std::isfinite(limit_lo) ? std::clamp<double>(limit_lo, 0.0, 1.0) : 0.0;
+  double l1 = std::isfinite(limit_hi) ? std::clamp<double>(limit_hi, 0.0, 1.0) : 1.0;
+  if (l1 - l0 < kMinZoneExtent) {
+    l0 = 0.0;
+    l1 = 1.0;
+  }
+  const uint32_t avail_px = static_cast<uint32_t>(std::floor((l1 - l0) * full));
+  axis.center_px = std::min({center, full, avail_px});
+  // The midpoint zone is at least the centre zone and kMinZoneExtent of the
+  // screen (an empty zone would be an empty working axis, and its bounds
+  // would encode as 0 = the whole axis), and at most what is left.
+  const uint32_t min_mid_px = std::min(
+      static_cast<uint32_t>(std::ceil(kMinZoneExtent * full)), avail_px);
+  const uint32_t mid_px = std::clamp(
+      std::min(mid, full), std::max(axis.center_px, min_mid_px), avail_px);
+  bool cropped = mid_px < full;
+  if (full < 16u || (!cropped && axis.center_px >= full)) return axis;
+  uint32_t e_code = static_cast<uint32_t>(
       std::clamp<long>(std::lround(std::clamp(edge, kMinEdge, kMaxEdge) * kEdgeScale),
                        static_cast<long>(kEdgeMin), static_cast<long>(kEdgeMax) + 1));
-  if (e_code > kEdgeMax) return axis;  // edge 1.0: no warp
+  if (e_code > kEdgeMax) {
+    if (!cropped) return axis;  // midpoint 1.0 and nothing off: no warp
+    e_code = kEdgeMax;          // 0.99: the crop still needs the mapping
+  }
   const double half = 0.5 * static_cast<double>(full);
   const uint32_t a_code = static_cast<uint32_t>(std::clamp<long>(
       std::lround(0.5 * axis.center_px / half * kCenterScale), 0, kCenterMax));
@@ -135,17 +194,53 @@ inline Axis MakeAxis(uint32_t full, uint32_t center, uint32_t falloff, float edg
   const Decoded p = Decode(axis.packed);
   // Safeguards on the position: non-finite means the middle; snap to whole
   // output pixels (sub-pixel slider jitter must not rebuild the grid and
-  // reset NR's history); then keep the decoded zone [c - a/2, c + a/2] on
-  // screen, which also keeps both sides of the axis non-empty.
+  // reset NR's history); then keep the decoded centre zone [c - a/2, c + a/2]
+  // inside the limits, which also keeps both sides of the axis non-empty.
   const double wanted =
       std::isfinite(position) ? std::clamp<double>(position, 0.0, 1.0) : 0.5;
   const double snapped = std::round(wanted * full) / full;
-  axis.center = static_cast<float>(std::clamp(snapped, 0.5 * p.a, 1.0 - 0.5 * p.a));
+  const double c_lo = l0 + 0.5 * p.a;
+  const double c_hi = l1 - 0.5 * p.a;
+  axis.center =
+      static_cast<float>(c_lo <= c_hi ? std::clamp(snapped, c_lo, c_hi) : 0.5 * (l0 + l1));
   const double c = axis.center;  // exactly what the shaders get
   axis.position_px = static_cast<uint32_t>(std::lround(c * full));
-  axis.gmax = static_cast<float>(0.5 * GTotal(c, p));
+  // Midpoint zone: centred on c, shifted (never shrunk) to stay inside the
+  // limits.  It contains the centre zone because it is at least as large and
+  // both are inside the same limits.  Codes round outward.
+  double m0 = 0.0;
+  double m1 = 1.0;
+  if (cropped) {
+    // At least the DECODED centre extent: a's 12-bit code can round a hair
+    // above a same-sized midpoint zone.
+    const double extent = std::max(static_cast<double>(mid_px) / full, p.a);
+    double lo = c - 0.5 * extent;
+    double hi = c + 0.5 * extent;
+    if (lo < l0) {
+      hi += l0 - lo;
+      lo = l0;
+    }
+    if (hi > l1) {
+      lo -= hi - l1;
+      hi = l1;
+    }
+    const uint32_t lo_code = static_cast<uint32_t>(
+        std::clamp(std::floor(std::max(lo, 0.0) * kBoundsScale), 0.0, kBoundsScale));
+    const uint32_t hi_code = static_cast<uint32_t>(
+        std::clamp(std::ceil(std::min(hi, 1.0) * kBoundsScale), 0.0, kBoundsScale));
+    if (lo_code == 0u && hi_code == 0xFFFFu) {
+      cropped = false;  // rounds to the whole axis
+    } else {
+      axis.bounds = lo_code | (hi_code << 16);
+      DecodeBounds(axis.bounds, &m0, &m1);
+    }
+  }
+  axis.mid_lo_px = static_cast<uint32_t>(std::lround(m0 * full));
+  axis.mid_hi_px = static_cast<uint32_t>(std::lround(m1 * full));
+  axis.blend = static_cast<float>(std::min<double>(blend, full) / full);
+  axis.gmax = static_cast<float>(0.5 * GTotal(c, m0, m1, p));
   // Overlay numbers for the longer side (the one that reaches lowest).
-  const double side = 2.0 * std::max(c, 1.0 - c);
+  const double side = 2.0 * std::max(c - m0, m1 - c);
   const double on_screen = std::clamp(side - p.a, 0.0, p.b);
   axis.falloff_px = static_cast<uint32_t>(std::lround(on_screen * half));
   if (p.b <= 0.0 || side >= p.a + p.b) {
@@ -163,11 +258,13 @@ struct Grid {
   bool active() const { return x.packed != 0u || y.packed != 0u; }
   // NR pixels over the uniform grid's.
   double PixelFactor() const { return static_cast<double>(x.gmax) * y.gmax; }
-  // The centres are part of the mapping: a moved zone is a new grid (new
-  // working size, reset NR history), never a stale warp.
+  // Centre and bounds are part of the mapping: a moved or resized zone is a
+  // new grid (new working size, reset NR history), never a stale warp.  The
+  // blend width only weights the resolve, so it is not compared.
   bool operator==(const Grid& o) const {
     return x.packed == o.x.packed && y.packed == o.y.packed
-        && x.center == o.x.center && y.center == o.y.center;
+        && x.center == o.x.center && y.center == o.y.center
+        && x.bounds == o.x.bounds && y.bounds == o.y.bounds;
   }
   bool operator!=(const Grid& o) const { return !(*this == o); }
 };
@@ -184,9 +281,11 @@ inline Grid MakeGrid(bool enabled, const Params& params, uint32_t full_width,
     reason = Inactive::kOff;
   } else {
     grid.x = MakeAxis(full_width, params.center_width, params.falloff, params.edge,
-                      params.center_x);
+                      params.center_x, params.mid_width, params.blend, params.limit_x0,
+                      params.limit_x1);
     grid.y = MakeAxis(full_height, params.center_height, params.falloff, params.edge,
-                      params.center_y);
+                      params.center_y, params.mid_height, params.blend, params.limit_y0,
+                      params.limit_y1);
     if (!grid.active()) {
       reason = Inactive::kCentreCoversScreen;
     } else if (grid.PixelFactor() > 1.0 - kMinSaving) {
@@ -194,12 +293,12 @@ inline Grid MakeGrid(bool enabled, const Params& params, uint32_t full_width,
     }
     if (reason != Inactive::kNone) {
       // Keep the effective numbers for the overlay, drop the warp.
-      grid.x.packed = 0u;
-      grid.x.center = 0.5f;
-      grid.x.gmax = 1.f;
-      grid.y.packed = 0u;
-      grid.y.center = 0.5f;
-      grid.y.gmax = 1.f;
+      for (Axis* axis : {&grid.x, &grid.y}) {
+        axis->packed = 0u;
+        axis->center = 0.5f;
+        axis->bounds = 0u;
+        axis->gmax = 1.f;
+      }
     }
   }
   if (why != nullptr) *why = reason;
@@ -219,10 +318,13 @@ inline uint32_t WarpedExtent(uint32_t uniform, const Axis& axis) {
 inline double Warp(double n, const Axis& axis) {
   if (axis.packed == 0u) return n;
   const Decoded p = Decode(axis.packed);
+  double m0 = 0.0;
+  double m1 = 1.0;
+  DecodeBounds(axis.bounds, &m0, &m1);
   const double c = axis.center;
   const double t = n - c;
   const double s = t < 0.0 ? -1.0 : (t > 0.0 ? 1.0 : 0.0);
-  return (G(2.0 * c, p) + s * G(2.0 * std::abs(t), p)) / GTotal(c, p);
+  return (G(2.0 * (c - m0), p) + s * G(2.0 * std::abs(t), p)) / GTotal(c, m0, m1, p);
 }
 
 }  // namespace foveation

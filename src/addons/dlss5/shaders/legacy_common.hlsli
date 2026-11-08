@@ -25,10 +25,14 @@ cbuffer CodecConstants : register(b0) {
   // debug layer's undersized-root-constant check against the root signature.
   float4 Padding;
   // dwords 20..23 unused; the foveated grid (foveation.hlsli) is dwords
-  // 24..27 in every codec view.  0 = uniform axis.
+  // 24..31 in every codec view.  0 = uniform axis.
   float4 Padding2;
   uint2 Foveation;
   float2 FoveationCenter;
+  // Midpoint-zone bounds per axis (m0 | m1 << 16, /65535; 0 = whole axis)
+  // and the NR-off blend width, normalized (foveation.hlsli).
+  uint2 FoveationBounds;
+  float2 FoveationBlend;
 };
 
 #include "codec_math.hlsli"
@@ -150,7 +154,7 @@ float3 ResolvePixel(uint2 pixel, float3 source) {
       proxy_size - 1);
   [branch] if (FovAny(Foveation)) {
     proxy_pixel = min(
-        uint2(max(FovFullToWorkPos(pixel, Size, proxy_size, Foveation, FoveationCenter) + 0.5,
+        uint2(max(FovFullToWorkPos(pixel, Size, proxy_size, Foveation, FoveationCenter, FoveationBounds) + 0.5,
                   0.0)),
         proxy_size - 1u);
   }
@@ -163,7 +167,7 @@ float3 ResolvePixel(uint2 pixel, float3 source) {
       neural_size - 1);
   [branch] if (FovAny(Foveation)) {
     neural_pixel = min(
-        uint2(max(FovFullToWorkPos(pixel, Size, neural_size, Foveation, FoveationCenter) + 0.5,
+        uint2(max(FovFullToWorkPos(pixel, Size, neural_size, Foveation, FoveationCenter, FoveationBounds) + 0.5,
                   0.0)),
         neural_size - 1u);
   }
@@ -197,7 +201,14 @@ float3 ResolvePixel(uint2 pixel, float3 source) {
   // range so the frame is never blacked out and highlights stay bounded.
   const float ratio = original_y == 0.0 ? 1.0 : clamp(upgraded_y / original_y, 0.0, 4.0);
   const float3 luminance_only = original * ratio;
-  const float3 result = lerp(luminance_only, upgraded, ColorStrength);
+  float3 result = lerp(luminance_only, upgraded, ColorStrength);
+  // Dual foveation: outside the midpoint zone NR is off - the game's pixels,
+  // faded in over the blend width (FovZoneWeight; 1 when not foveated).
+  [branch] if (FovAny(Foveation)) {
+    const float w = FovZoneWeight(
+        (float2(pixel) + 0.5) / float2(Size), Foveation, FoveationBounds, FoveationBlend);
+    result = lerp(original, result, w);
+  }
 
   float3 encoded = result;
   if (HdrMode == 1) {

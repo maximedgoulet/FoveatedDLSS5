@@ -101,15 +101,18 @@ struct Constants {
   uint32_t motion_grid[2];
   float gf_eps;
   uint32_t padding0;
-  // Foveated working grid (foveation.hlsli), dwords 32..35: packed X/Y
-  // (0 = uniform axis) and the centre zone's position per axis.  HLSL keeps the
-  // uint2 on a 16-byte register, hence padding0.
+  // Foveated working grid (foveation.hlsli), dwords 32..39: packed X/Y
+  // (0 = uniform axis), the centre zone's position, the midpoint-zone bounds
+  // and the NR-off blend width per axis.  HLSL keeps the uint2 on a 16-byte
+  // register, hence padding0.
   uint32_t foveation[2];
   float foveation_center[2];
+  uint32_t foveation_bounds[2];
+  float foveation_blend[2];
 };
 static_assert(
-    sizeof(Constants) == 36 * sizeof(uint32_t),
-    "the look root signature declares exactly 36 32-bit constants");
+    sizeof(Constants) == 40 * sizeof(uint32_t),
+    "the look root signature declares exactly 40 32-bit constants");
 static_assert(offsetof(Constants, foveation) == 32 * sizeof(uint32_t),
               "LookConstants.Foveation is dword 32");
 
@@ -181,6 +184,8 @@ struct Frame {
   // initializers that build a Frame stay in member order.
   uint32_t foveation[2] = {0, 0};
   float foveation_center[2] = {0.5f, 0.5f};
+  uint32_t foveation_bounds[2] = {0, 0};
+  float foveation_blend[2] = {0.f, 0.f};
 };
 
 inline uint32_t BandRadius(const Settings& s, uint32_t nr_height) {
@@ -233,6 +238,10 @@ inline Constants MakeConstants(const Settings& s, const Frame& f) {
   c.foveation[1] = f.foveation[1];
   c.foveation_center[0] = f.foveation_center[0];
   c.foveation_center[1] = f.foveation_center[1];
+  c.foveation_bounds[0] = f.foveation_bounds[0];
+  c.foveation_bounds[1] = f.foveation_bounds[1];
+  c.foveation_blend[0] = f.foveation_blend[0];
+  c.foveation_blend[1] = f.foveation_blend[1];
   return c;
 }
 

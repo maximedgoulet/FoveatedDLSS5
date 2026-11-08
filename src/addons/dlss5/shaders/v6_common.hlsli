@@ -47,11 +47,15 @@ cbuffer CodecConstants : register(b0) {
   // (the N/P gain alone), 1 = consistent (adds the curve-gain correction
   // below).  Only BindCodecV6's resolve dispatch reads it.
   uint TransferMode;
-  // Foveated working grid (foveation.hlsli), dwords 24..27: the per-axis
+  // Foveated working grid (foveation.hlsli), dwords 24..31: the per-axis
   // packed warp and the centre zone's position.  0 = uniform axis; every working
   // <-> full mapping below is bit-identical to the uniform one then.
   uint2 Foveation;
   float2 FoveationCenter;
+  // Midpoint-zone bounds per axis (m0 | m1 << 16, /65535; 0 = whole axis)
+  // and the NR-off blend width, normalized (foveation.hlsli).
+  uint2 FoveationBounds;
+  float2 FoveationBlend;
 };
 
 #include "foveation.hlsli"
@@ -246,7 +250,7 @@ float3 DecodeProxyLinear(float3 encoded) {
 // Continuous texel position on a working-resolution surface (P or N) of the
 // full-grid pixel centre `pixel`, warped per axis on a foveated grid.
 float2 WorkPosFromFull(uint2 tex_size, uint2 pixel) {
-  return FovFullToWorkPos(pixel, Size, tex_size, Foveation, FoveationCenter);
+  return FovFullToWorkPos(pixel, Size, tex_size, Foveation, FoveationCenter, FoveationBounds);
 }
 
 float3 SampleProxyLinearBilinear(uint2 tex_size, uint2 pixel, float2 pos) {
@@ -365,6 +369,13 @@ float3 ResolvePixel(uint2 pixel, float3 original) {
     const float ratio = original_y == 0.0 ? 1.0 : clamp(upgraded_y / original_y, 0.0, 4.0);
     const float3 luminance_only = original * ratio;
     result = lerp(luminance_only, upgraded, ColorStrength);
+  }
+  // Dual foveation: outside the midpoint zone NR is off - the game's pixels,
+  // faded in over the blend width (FovZoneWeight; 1 when not foveated).
+  [branch] if (FovAny(Foveation)) {
+    const float w = FovZoneWeight(
+        (float2(pixel) + 0.5) / float2(Size), Foveation, FoveationBounds, FoveationBlend);
+    result = lerp(original, result, w);
   }
   return result;
 }

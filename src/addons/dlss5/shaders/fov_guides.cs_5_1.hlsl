@@ -22,8 +22,8 @@ Texture2D<float2> GuideMotion : register(t1);
 RWTexture2D<float2> WarpedMotion : register(u0);
 RWTexture2D<float> WarpedDepth : register(u1);
 
-// The codec root signature's 28 dwords, this program's own view.  The warp
-// sits at dwords 24..27 like every other codec view.
+// The codec root signature's 32 dwords, this program's own view.  The warp
+// sits at dwords 24..31 like every other codec view.
 cbuffer FovGuideConstants : register(b0) {
   uint2 Size;          // working grid (the NR surface)
   uint2 MotionGrid;    // grid the vectors describe (render or output)
@@ -39,6 +39,10 @@ cbuffer FovGuideConstants : register(b0) {
   uint4 Reserved4;
   uint2 Foveation;
   float2 FoveationCenter;
+  // Midpoint-zone bounds per axis (m0 | m1 << 16, /65535; 0 = whole axis)
+  // and the NR-off blend width, normalized (foveation.hlsli).
+  uint2 FoveationBounds;
+  float2 FoveationBlend;
 };
 
 static const uint kFlagDepth = 1u;
@@ -50,7 +54,7 @@ void main(uint3 dispatch_id : SV_DispatchThreadID) {
   if (any(pixel >= Size)) return;
 
   // Normalized full-frame position of this working texel's centre.
-  const float2 n = FovUnwarp((float2(pixel) + 0.5) / float2(Size), Foveation, FoveationCenter);
+  const float2 n = FovUnwarp((float2(pixel) + 0.5) / float2(Size), Foveation, FoveationCenter, FoveationBounds);
 
   if ((Flags & kFlagDepth) != 0u) {
     // Nearest, never filtered: blending depth across a silhouette invents a
@@ -71,7 +75,7 @@ void main(uint3 dispatch_id : SV_DispatchThreadID) {
     // The current position's warp is the texel centre by construction.
     const float2 d = mv / float2(grid);
     const float2 v_now = (float2(pixel) + 0.5) / float2(Size);
-    const float2 v_prev = FovWarp(n + d, Foveation, FoveationCenter);
+    const float2 v_prev = FovWarp(n + d, Foveation, FoveationCenter, FoveationBounds);
     warped = (v_prev - v_now) * float2(Size);
   }
   WarpedMotion[pixel] = warped;

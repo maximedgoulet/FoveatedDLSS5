@@ -10,7 +10,7 @@ void main(uint3 dispatch_id : SV_DispatchThreadID) {
       source_size - 1);
   [branch] if (FovAny(Foveation)) {
     const float2 uniform_n = (float2(pixel) + 0.5) / float2(Size);
-    float2 n = FovUnwarp(uniform_n, Foveation, FoveationCenter);
+    float2 n = FovUnwarp(uniform_n, Foveation, FoveationCenter, FoveationBounds);
     // An axis whose grids match stays uniform (as FovFullToWorkPos does).
     if (Size.x == source_size.x) n.x = uniform_n.x;
     if (Size.y == source_size.y) n.y = uniform_n.y;

@@ -62,10 +62,14 @@ cbuffer LookConstants : register(b0) {
   uint2 MotionGrid;   // E: the pixel grid the MV texels describe
   float GfEps;        // D: guided-filter regularization, stops^2
   uint Padding0;
-  // Foveated working grid (foveation.hlsli), dwords 32..35: per-axis packed
+  // Foveated working grid (foveation.hlsli), dwords 32..39: per-axis packed
   // warp and the centre zone's position; 0 = uniform axis.
   uint2 Foveation;
   float2 FoveationCenter;
+  // Midpoint-zone bounds per axis (m0 | m1 << 16, /65535; 0 = whole axis)
+  // and the NR-off blend width, normalized (foveation.hlsli).
+  uint2 FoveationBounds;
+  float2 FoveationBlend;
 };
 
 static const uint kFlagBands = 1u << 0;

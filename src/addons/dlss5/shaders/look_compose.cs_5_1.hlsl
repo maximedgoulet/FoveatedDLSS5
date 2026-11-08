@@ -49,12 +49,12 @@ void main(uint3 dispatch_id : SV_DispatchThreadID) {
           // MotionScale is MV texel -> NR pixels, so MV * MotionScale / NrSize
           // is the normalized full-frame displacement.
           const float2 n = FovUnwarp(
-              (float2(pixel) + 0.5) / float2(NrSize), Foveation, FoveationCenter);
+              (float2(pixel) + 0.5) / float2(NrSize), Foveation, FoveationCenter, FoveationBounds);
           const uint2 texel = MotionBase
               + min(uint2(saturate(n) * float2(MotionGrid)), MotionGrid - 1u);
           const float2 d =
               Motion.Load(int3(texel, 0)).xy * MotionScale / float2(NrSize);
-          previous = FovWarp(n + d, Foveation, FoveationCenter) * float2(NrSize) - 0.5;
+          previous = FovWarp(n + d, Foveation, FoveationCenter, FoveationBounds) * float2(NrSize) - 0.5;
         } else {
           const uint2 texel = MotionBase
               + min(uint2((float2(pixel) + 0.5) * float2(MotionGrid) / float2(NrSize)),
@@ -117,7 +117,7 @@ void main(uint3 dispatch_id : SV_DispatchThreadID) {
     float2 footprint_min = float2(pixel) * scale;
     float2 footprint_max = min(footprint_min + scale, float2(FullSize));
     [branch] if (FovAny(Foveation)) {
-      FovWorkFootprint(uint2(pixel), NrSize, FullSize, Foveation, FoveationCenter,
+      FovWorkFootprint(uint2(pixel), NrSize, FullSize, Foveation, FoveationCenter, FoveationBounds,
                        footprint_min, footprint_max);
     }
     const int2 first = int2(floor(footprint_min));
