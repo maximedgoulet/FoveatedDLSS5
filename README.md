@@ -6,7 +6,7 @@
 
 FoveatedDLSS5 is the open-source RenoDX DLSS 5 add-on (`renodx-dlss5`, RenoDX-DLSS5-Generic v7.5.0-rc5) with **dual foveation** built in. Everything else in the add-on works exactly as before, and with foveation off it *is* the stock add-on.
 
-> **Status: pre-release.** v0.1 was tested in The Witcher 3 (DX12, 7680×2160, RTX 4090). The movable zones, dual foveation (v0.3), and the percent-based zones with the on-screen preview (v0.4) are new and not yet fully tested in games. Field reports are very welcome.
+> **Status: pre-release.** Measured in The Witcher 3 (v0.1, **49 → 81 fps**) and Forza Horizon (v0.4, **15 → 25 fps**), both at 7680×2160 with two stacked NR passes: see [Measured in games](#measured-in-games). Field reports are very welcome.
 
 ---
 
@@ -50,6 +50,25 @@ How much of a full-screen NR pass is left (NR pixels, centre at native resolutio
 **Why wider screens win bigger:** what your eyes cover scales with the screen's *height*, not its width. On 32:9 the extra width is all periphery, and that's exactly what foveation trims. The presets below keep the same zone *heights* on every display and take a smaller share of the width on wider screens.
 
 > These are theoretical NR pixel counts from the add-on's own math, not measured frame times. NR's cost tracks its pixel count, but the add-on's own passes (squeeze, guide resample, resolve) and fixed overheads remain, so the real frame-time gain is smaller. Turn on **GPU timers** (Diagnostics) and the overlay shows the measured NR time next to the forecast. Or measure with PresentMon or CapFrameX, and tell us what you get.
+
+## Measured in games
+
+Same scene, same settings, foveation off and on. Both games run DLSS 5 NR with **two stacked passes** at 7680×2160, and the FPS are the rendered frame rate. **[Open the full-resolution comparisons →](https://maximedgoulet.github.io/FoveatedDLSS5/)** (a slider, zoom down to the pixel).
+
+| Game | Version and layout | Foveation off | Foveation on | Gain |
+|---|---|---|---|---|
+| **Forza Horizon** | v0.4: centre 46 × 54 %, contour 23 × 30 % at 0.44, vertical 58 % (NR on 42 % of the pixels) | 15 fps (67 ms) | **25 fps (40 ms)** | **+67 %**, 27 ms less per frame |
+| **The Witcher 3** (RTX 4090) | v0.1: centre 3295 × 1157 px, edges at 0.25 (48 % of the NR pixels) | 49 fps (20.4 ms) | **81 fps (12.3 ms)** | **+65 %**, 8 ms less per frame |
+
+**The forecast holds up.** In Forza Horizon, NR off runs at 55 fps (18 ms), so the two NR passes cost about 48 ms at full screen and about 22 ms foveated: **45 % of the full cost**, where the overlay's forecast said **42 %**. The few points between them are the add-on's own fixed passes.
+
+[![Forza Horizon, foveation off (15 fps) and on (25 fps) with the zones drawn](docs/images/forza-horizon-foveation.jpg)](https://maximedgoulet.github.io/FoveatedDLSS5/?c=forza)
+
+*Forza Horizon. Top: foveation off, 15 fps. Bottom: foveation on, 25 fps, with the overlay open and the zones drawn over the game (teal centre, amber contour, darkened edge).*
+
+[![The Witcher 3, foveation off (49 fps) and on (81 fps)](docs/images/witcher3-foveation.jpg)](https://maximedgoulet.github.io/FoveatedDLSS5/?c=witcher3)
+
+*The Witcher 3. Top: foveation off, 49 fps. Bottom: foveation on, 81 fps.*
 
 ## Presets
 
