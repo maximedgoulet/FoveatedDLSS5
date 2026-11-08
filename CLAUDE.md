@@ -17,6 +17,8 @@ else in the tree is upstream and untouched. Read `AGENTS.md` (upstream rules) an
 | Player-facing doc, presets, savings tables | `README.md` |
 | The only CI workflow | `.github/workflows/build-dlss5.yml` |
 | Release notes, one file per tag | `.github/release-notes/vX.Y.Z.md` |
+| Comparison site (before/after slider), https://maximedgoulet.github.io/FoveatedDLSS5/ | branch `gh-pages`: `comparisons.js` lists pairs, lossless WebP in `images/` (no LFS there) |
+| README screenshots | `docs/images/*.jpg` (Git LFS via `.gitattributes`; GitHub still renders them) |
 
 `foveation.hpp` and `foveation.hlsli` mirror each other (packed per-axis dword, density
 integral G, bounds). Change them together. Shader cbuffers carry
@@ -84,7 +86,8 @@ sizes are static_asserted in `dlssnr.hpp` and `look_stage.hpp`.
 
 - `main`: v0.4.0 released (percent zones, zone map, NR saving forecast, on-screen
   zone preview). v0.3.0 had pixel-based settings; those keys are no longer read.
-  First field test 2026-11-08: Forza Horizon, 7680x2160, zones and preview work.
+  Measured 2026-11-08 (2 NR passes, 7680x2160): Forza Horizon 15 -> 25 fps (v0.4),
+  The Witcher 3 49 -> 81 fps (v0.1). README section "Measured in games".
 - `feat/half-rate`: half-rate NR (NR every other frame, reprojected through motion
   vectors, disarmed for a debounce of frames when motion is fast). CI green, not
   tested in game. Will need a rebase on the percent-zones settings.
