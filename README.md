@@ -136,6 +136,7 @@ ReShade overlay → **Add-ons** → **DLSS 5 Neural Rendering**. The foveation c
 | Zone map | — | — | Your screen in its aspect ratio with the zones as they run: teal centre, amber contour, dark edge. |
 | NR saving | — | — | The forecast: how much NR work the layout removes and how the screen splits. With GPU timers on, also the measured NR time with and without foveation. |
 | Centre width / height | `NRFoveationCenterW` / `NRFoveationCenterH` | `50` / `50` | The full-resolution centre zone, in **% of the screen**. |
+| Contour to the screen edges | `NRFoveationNoEdge` | `0` | `1` makes the low-resolution contour reach the borders of the screen: no edge where NR is off, just the centre and the contour around it. Contour width, Contour height and Fade to the edge are then greyed out (the contour sliders show the size that runs). |
 | Contour width / height | `NRFoveationContourW` / `NRFoveationContourH` | `25` / `25` | Thickness added around the centre at the contour resolution, in % of the screen, both sides together (25 = 12.5 % per side). It can't exceed what the centre leaves. |
 | Edge (NR off) | — | — | Read-only: what's left (100 − centre − contour). NR is off there and you see the game's own image. |
 | Vertical / horizontal position | `NRFoveationCenterY` / `NRFoveationCenterX` | `50` / `50` | Where the zones sit, in %: `0` top/left, `50` middle, `100` bottom/right. |
@@ -171,11 +172,22 @@ ReShade overlay → **Add-ons** → **DLSS 5 Neural Rendering**. The foveation c
 - **Cut what you never look at first.** A bigger edge (roof, sky, far edges) saves more than lowering resolutions.
 - **Then shrink the centre**, then lower the contour resolution. 0.25–0.35 is where edits can start to look softer in your peripheral vision. Check in motion, not on stills.
 - **A longer fall-off and fade** hide the transitions better but save less.
-- **Expect a brief shimmer while dragging a zone slider.** Moving or resizing a zone resets NR's temporal history, and a size change also rebuilds NR after about half a second.
+- **NR pauses while you drag a resolution or zone slider.** You see the game's own image (and the zone outlines) during the drag, and NR comes back once, rebuilt for the new layout, when you let go. Without the pause every drag frame restarted NR, which stuttered.
+
+### Two-pass look in one pass, without the halo
+
+Under **Adjust NR's look** (`NRLookMode=1`):
+
+| Overlay | `ReShade.ini` key | Default | What it does |
+|---|---|---|---|
+| Edit strength | `NRLookStrength` | `1` | Scales NR's whole change, in stops. `2` doubles it. About `1.6`–`1.8` looks like two stacked NR passes for the cost of one. Range 0–3. |
+| Silhouette rim | `NRLookRim` | `0` | Finds the outlines of characters and objects in the game's depth and tames the glow NR puts on their near side. `1` keeps a single pass's glow there whatever the Edit strength; `2` removes it there. Darkening and the rest of the image keep the Edit strength. A road or floor running to the horizon is not an outline. |
+| Rim width | `NRLookRimWidth` | `0.35` | How far in from an outline the rim reaches, in % of the image height. |
+
+If the rim tames the background beside a character instead of the character, the game declares its depth the wrong way round: change **Depth convention** in the fixes. The rim needs the game's depth and motion vectors in a readable format; otherwise it stays off. In cockpit views the windshield can hide the real depth behind it.
 
 ## On the roadmap
 
-- **Half-rate NR** (optional, off by default): run NR every other frame and carry its edit through the in-between frame with the game's motion vectors. That's about 2× on top of everything above. It switches itself off for 5–10 frames whenever motion gets fast, and stays off until motion calms down.
 - **Auto-trim** (optional, off by default): finds the sky (from the game's depth buffer) and blown-out or pitch-black bands, and switches NR off there automatically. It costs under 1 % of NR.
 
 ## Checking that it works
