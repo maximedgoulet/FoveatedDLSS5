@@ -41,8 +41,11 @@ concurrency:
 jobs:
   # Same toolchain as upstream's nightly (latest Clang + lld-link), dlss5 only.
   # It caught an lld-link crash that the MSVC build does not see.
+  # Pinned to windows-2022 like the build job: windows-latest moved to Visual
+  # Studio 18, whose STL (MSVC 14.52) rejects any Clang older than 22 (STL1000),
+  # newer than the Clang the setup step installs (2026-11-23).
   clang:
-    runs-on: windows-latest
+    runs-on: windows-2022
     steps:
       - uses: actions/checkout@v4
         with:
