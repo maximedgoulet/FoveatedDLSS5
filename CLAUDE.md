@@ -98,7 +98,7 @@ sizes are static_asserted in `dlssnr.hpp` and `look_stage.hpp`.
 - Owner's direction after that test: favour image quality over further speed tricks.
 - `feat/look-rim` (2026-11-22, awaiting the owner's in-game test): the two-pass look from
   one pass (`NRLookStrength` up to 3; 1.6-1.8 approximates two stacked passes), the
-  silhouette rim (`NRLookRim`, `NRLookRimWidth`: depth bound into the look stage at t5
+  silhouette rim (`NRLookRim` 0-1 = share of outline brightening removed, `NRLookRimWidth`, `NRLookRimShow` magenta mask: depth bound into the look stage at t5
   through the foveated guide ring; plane-predicted depth-edge detector in
   `look_compose`), `NRFoveationNoEdge` (contour to the screen borders), and NR paused
   while a resolution/zone slider is dragged (`nr_paused_until_ns`, `NrRunning()`).

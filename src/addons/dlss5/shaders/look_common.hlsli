@@ -76,7 +76,7 @@ cbuffer LookConstants : register(b0) {
   // Silhouette rim, dwords 40..47.
   uint2 DepthBase;    // depth subrect origin, texels
   uint2 DepthGrid;    // the pixel grid the depth is rendered at
-  float Rim;          // 0 off, 1 one pass at silhouettes, 2 no brightening
+  float Rim;          // share of the brightening removed at silhouettes, 0..1
   float RimRadius;    // reach, NR pixels
   uint2 Padding1;
 };
@@ -90,6 +90,7 @@ static const uint kFlagRefLinear = 1u << 5;
 static const uint kFlagHistoryValid = 1u << 6;
 static const uint kFlagDepth = 1u << 7;
 static const uint kFlagDepthInverted = 1u << 8;
+static const uint kFlagRimShow = 1u << 9;
 
 static const float kRatioFloor = 1.0 / 1024.0;  // v6_resolve's N/P floor
 static const float3 kW = float3(0.212639, 0.715169, 0.072192);
@@ -150,11 +151,11 @@ float ZoneGain(float I) {
 // the fine band; wider halos need a larger Detail radius.
 //
 // `silhouette` (0..1) is how close the pixel sits to the near side of a depth
-// edge (look_compose).  There, the brightening's gain falls from g toward a
-// single pass's 1 as Rim goes 0 -> 1, then toward 0 as Rim goes 1 -> 2: the
-// glow NR puts on skin at a character's outline looks real once and wrong
-// when Strength doubles it.  Darkening keeps g.  The blend over the first
-// 0.05 stop of brightening keeps the colour gain continuous where a = 0.
+// edge (look_compose).  There, Rim removes that share of the brightening, at
+// any Strength: the glow NR puts on skin at a character's outline, which
+// stacked passes or a raised Strength turn into a halo.  Darkening keeps g.
+// The blend over the first 0.05 stop of brightening keeps the colour gain
+// continuous where a = 0.
 float3 ShapeEdit(Edit x, float aB, float aD, float3 c, float m, float silhouette) {
   aD -= Halo * smoothstep(1.0, 3.0, m - x.I) * min(aD, 0.0);
   float a = Tone * aB + Detail * aD;
@@ -165,8 +166,7 @@ float3 ShapeEdit(Edit x, float aB, float aD, float3 c, float m, float silhouette
   ColourSplit(c, x.lp, c_r, c_t, s);
   c = s * (ColourGain * c_r + HueGain * c_t) + (1.0 - s) * ColourGain * c;
   const float g = Strength * ZoneGain(x.I);
-  const float g_rim = lerp(g, min(g, 1.0), saturate(Rim) * silhouette)
-      * (1.0 - saturate(Rim - 1.0) * silhouette);
+  const float g_rim = g * (1.0 - saturate(Rim) * silhouette);
   const float k = lerp(g, g_rim, smoothstep(0.0, 0.05, a));
   a *= k;
   c *= k;

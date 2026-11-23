@@ -40,6 +40,8 @@ constexpr uint32_t kFlagHistoryValid = 1u << 6;
 // game's depth runs 1 near, 0 far.
 constexpr uint32_t kFlagDepth = 1u << 7;
 constexpr uint32_t kFlagDepthInverted = 1u << 8;
+// Tint the detected silhouettes magenta (the rim's tuning view).
+constexpr uint32_t kFlagRimShow = 1u << 9;
 
 // Root parameters.
 enum : uint32_t {
@@ -115,7 +117,7 @@ struct Constants {
   uint32_t foveation_bounds[2];
   float foveation_blend[2];
   // Silhouette rim, dwords 40..47: the depth subrect (texels) and the grid it
-  // is rendered at, the rim amount (0..2) and its reach in NR pixels.
+  // is rendered at, the rim amount (0..1) and its reach in NR pixels.
   uint32_t depth_base[2];
   uint32_t depth_grid[2];
   float rim;
@@ -153,10 +155,11 @@ struct Settings {
   float stabilize_ms = 60.f;
   bool stabilize_detail = false;
   uint32_t upsample = 0;      // 0 classic, 1 edge-aware
-  // Silhouette rim: on the near side of a depth edge, brightening falls back
-  // from Strength toward a single pass (1) and then toward none (2); 0 off.
+  // Silhouette rim: the share of the brightening removed on the near side of
+  // a depth edge, at any Strength (0 off, 1 none left there).
   float rim = 0.f;
-  float rim_width = 0.35f;  // percent of the NR height
+  float rim_width = 0.5f;  // percent of the NR height
+  bool rim_show = false;   // tint what the rim detects
 };
 
 // Every per-pixel gain is the identity: the compose would return N.
@@ -165,7 +168,12 @@ inline bool GainsNeutral(const Settings& s) {
       && s.max_brighten <= 0.f && s.max_darken <= 0.f && s.colour == 1.f
       && s.hue == 1.f && s.max_colour <= 0.f && s.shadows == 1.f
       && s.midtones == 1.f && s.highlights == 1.f && s.tone == 1.f
-      && s.detail == 1.f && s.halo <= 0.f && s.rim <= 0.f;
+      && s.detail == 1.f && s.halo <= 0.f && s.rim <= 0.f && !s.rim_show;
+}
+
+// The rim needs the game's depth: to act or to show what it detects.
+inline bool RimWanted(const Settings& s) {
+  return s.rim > 0.f || s.rim_show;
 }
 
 inline bool BandsWanted(const Settings& s) {
@@ -236,7 +244,8 @@ inline Constants MakeConstants(const Settings& s, const Frame& f) {
       | (f.reference_linear ? kFlagRefLinear : 0u)
       | (temporal && f.history_valid ? kFlagHistoryValid : 0u)
       | (f.depth ? kFlagDepth : 0u)
-      | (f.depth && f.depth_inverted ? kFlagDepthInverted : 0u);
+      | (f.depth && f.depth_inverted ? kFlagDepthInverted : 0u)
+      | (f.depth && s.rim_show ? kFlagRimShow : 0u);
   c.strength = s.strength;
   c.brighten = s.brighten;
   c.darken = s.darken;
@@ -275,7 +284,7 @@ inline Constants MakeConstants(const Settings& s, const Frame& f) {
   c.depth_grid[0] = std::max(f.depth_grid[0], 1u);
   c.depth_grid[1] = std::max(f.depth_grid[1], 1u);
   // Without depth there are no silhouettes to find: the rim is off.
-  c.rim = f.depth ? std::clamp(s.rim, 0.f, 2.f) : 0.f;
+  c.rim = f.depth ? std::clamp(s.rim, 0.f, 1.f) : 0.f;
   c.rim_radius = std::max(s.rim_width * 0.01f * static_cast<float>(f.nr_height), 1.f);
   return c;
 }

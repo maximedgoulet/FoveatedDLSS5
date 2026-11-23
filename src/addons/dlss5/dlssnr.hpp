@@ -1528,6 +1528,7 @@ inline std::atomic_bool look_stabilize_detail = defaults::kLook.stabilize_detail
 inline std::atomic_uint32_t look_upsample = defaults::kLook.upsample;
 inline std::atomic<float> look_rim = defaults::kLook.rim;
 inline std::atomic<float> look_rim_width = defaults::kLook.rim_width;
+inline std::atomic_bool look_rim_show = defaults::kLook.rim_show;
 inline std::atomic_bool edit_trace_enabled = defaults::kEditTrace;
 // Latched when the look's programs or surfaces could not be created: the
 // look (and the trace) stay off for the session, NR runs on without them.
@@ -1730,6 +1731,7 @@ inline look::Settings LookSettingsSnapshot() {
       .upsample = look_upsample.load(),
       .rim = look_rim.load(),
       .rim_width = look_rim_width.load(),
+      .rim_show = look_rim_show.load(),
   };
 }
 inline std::atomic_uint32_t last_result = NVSDK_NGX_Result_FAIL_NotInitialized;
@@ -6834,9 +6836,27 @@ inline LookRoute RunLookStage(
 
   // Silhouette rim: the game's depth through the foveated guides' write-once
   // [depth, motion] ring (FovGuideRingSlot), whose set starts with the depth
-  // view.  Without a readable depth MakeConstants turns the rim off.
-  if (settings.rim > 0.f && frame.depth != nullptr && frame.motion != nullptr) {
-    if (const int ring = FovGuideRingSlot(device, res, frame.depth, frame.motion); ring >= 0) {
+  // view.  Without a readable depth MakeConstants turns the rim off.  The
+  // first frame that wants it logs whether it got the depth.
+  if (look::RimWanted(settings)) {
+    const int ring = (frame.depth != nullptr && frame.motion != nullptr)
+        ? FovGuideRingSlot(device, res, frame.depth, frame.motion)
+        : -1;
+    static std::atomic<bool> logged_rim{false};
+    if (!logged_rim.exchange(true)) {
+      std::ostringstream message;
+      if (ring >= 0) {
+        message << "silhouette rim: game depth bound (format "
+                << static_cast<uint32_t>(frame.depth->GetDesc().Format) << ", "
+                << (DepthInverted(frame) ? "inverted" : "normal") << ", " << frame.input_width
+                << 'x' << frame.input_height << ')';
+      } else {
+        message << "silhouette rim: off, the game's depth "
+                << (frame.depth == nullptr ? "is not passed to DLSS" : "is not readable");
+      }
+      Log(reshade::log::level::info, message.str());
+    }
+    if (ring >= 0) {
       submission::TrackUse(command_list, frame.depth);
       bindings.depth = DescriptorHeapSlot(
           heap_gpu, kDescriptorFovGuideRing + static_cast<uint32_t>(ring) * kCodecSrvSetStride,
@@ -15781,6 +15801,8 @@ inline constexpr Setting kSetLookRim{
     "NRLookRim", &look_rim, defaults::kLook.rim, SettingEffect::kNone};
 inline constexpr Setting kSetLookRimWidth{
     "NRLookRimWidth", &look_rim_width, defaults::kLook.rim_width, SettingEffect::kNone};
+inline constexpr Setting kSetLookRimShow{
+    "NRLookRimShow", &look_rim_show, defaults::kLook.rim_show, SettingEffect::kNone};
 
 // The HDR colour bridge: an Encoding or Linear Unit change recreates the
 // worksets, because the linear working surfaces and descriptor views are
@@ -15867,7 +15889,7 @@ inline constexpr const Setting* kLookSettings[] = {
     &kSetAutoMask,       &kSetUiCorrection};
 inline constexpr const Setting* kLookResultSettings[] = {
     &kSetLookMode,        &kSetLookStrength,     &kSetLookRim,
-    &kSetLookRimWidth,    &kSetLookBrighten,
+    &kSetLookRimWidth,    &kSetLookRimShow,      &kSetLookBrighten,
     &kSetLookDarken,      &kSetLookColour,       &kSetLookHue,
     &kSetLookShadows,     &kSetLookMidtones,     &kSetLookHighlights,
     &kSetLookMaxBrighten, &kSetLookMaxDarken,    &kSetLookMaxColour,
@@ -16340,15 +16362,21 @@ inline void DrawSectionLookResult(const ui::PanelText& text) {
       " stacked passes for the cost of one.  Strength steers the model; this"
       " reshapes its result.");
   SliderSetting(
-      text, kSetLookRim, "Silhouette rim", 0.f, 2.f, "%.2f",
-      "Tames the glow on the edge of characters and objects, found from the"
-      " game's depth.  0 off; 1 keeps a single pass's glow there whatever the"
-      " Edit strength; 2 removes the glow there.  Only brightening on the near"
-      " side of an outline changes; the rest of the image keeps the Edit"
-      " strength.  If it tames the background beside a character instead of"
-      " the character, the game declares its depth the wrong way round: change"
-      " the Depth convention in the fixes.");
-  ImGui::BeginDisabled(look_rim.load() <= 0.f);
+      text, kSetLookRim, "Silhouette rim", 0.f, 1.f, "%.2f",
+      "Removes the glow Neural Rendering puts on the edge of characters and"
+      " objects, found from the game's depth: the share of the brightening"
+      " taken away there, at any Edit strength.  0 off, 1 no glow left on the"
+      " outline.  Only brightening on the near side of an outline changes; the"
+      " rest of the image keeps the Edit strength.  Turn on Show rim mask to"
+      " see where it acts.");
+  ToggleSetting(
+      text, kSetLookRimShow, "Show rim mask",
+      "Tints magenta what the rim detects, so you can see where it acts while"
+      " you tune.  No magenta at all means the game's depth did not reach the"
+      " add-on (ReShade.log says why).  Magenta on the background beside a"
+      " character instead of on the character means the game declares its"
+      " depth the wrong way round: change the Depth convention in the fixes.");
+  ImGui::BeginDisabled(look_rim.load() <= 0.f && !look_rim_show.load());
   SliderSetting(
       text, kSetLookRimWidth, "Rim width", 0.1f, 2.f, "%.2f%%",
       "How far in from an outline the rim reaches, as a share of the image"
@@ -18633,6 +18661,7 @@ inline void LoadConfiguration() {
   reshade::get_config_value(nullptr, kConfigSection, "NRLookUpsample", saved_look.upsample);
   reshade::get_config_value(nullptr, kConfigSection, "NRLookRim", saved_look.rim);
   reshade::get_config_value(nullptr, kConfigSection, "NRLookRimWidth", saved_look.rim_width);
+  reshade::get_config_value(nullptr, kConfigSection, "NRLookRimShow", saved_look.rim_show);
   // Diagnostics, read-only from the ini (never persisted): the telemetry line
   // interval (0 = off) and the per-frame normalization trace.
   uint32_t saved_telemetry_seconds = telemetry_seconds.load();
@@ -19019,9 +19048,10 @@ inline void LoadConfiguration() {
   look_mode = saved_look_mode;
   look_strength = SanitizeFloatKey(
       saved_look.strength, defaults::kLook.strength, 0.f, 3.f, "NRLookStrength");
-  look_rim = SanitizeFloatKey(saved_look.rim, defaults::kLook.rim, 0.f, 2.f, "NRLookRim");
+  look_rim = SanitizeFloatKey(saved_look.rim, defaults::kLook.rim, 0.f, 1.f, "NRLookRim");
   look_rim_width = SanitizeFloatKey(
       saved_look.rim_width, defaults::kLook.rim_width, 0.1f, 2.f, "NRLookRimWidth");
+  look_rim_show = saved_look.rim_show;
   look_brighten = SanitizeFloatKey(
       saved_look.brighten, defaults::kLook.brighten, 0.f, 2.f, "NRLookBrighten");
   look_darken = SanitizeFloatKey(

@@ -55,7 +55,10 @@ static const float kWFloor = 1e-7;
 static const float2 kRimDirections[8] = {
     float2(1.0, 0.0), float2(0.7071, 0.7071), float2(0.0, 1.0), float2(-0.7071, 0.7071),
     float2(-1.0, 0.0), float2(-0.7071, -0.7071), float2(0.0, -1.0), float2(0.7071, -0.7071)};
-static const float kRimRingWeights[3] = {1.0, 0.8, 0.5};
+static const float kRimRingWeights[3] = {1.0, 1.0, 0.6};
+// Show rim mask: the multiplier at full silhouette, a magenta that survives
+// the resolve's ratio transfer.
+static const float3 kRimShowTint = float3(1.8, 0.35, 1.8);
 
 [numthreads(16, 16, 1)]
 void main(uint3 dispatch_id : SV_DispatchThreadID) {
@@ -140,7 +143,7 @@ void main(uint3 dispatch_id : SV_DispatchThreadID) {
   }
 
   float silhouette = 0.0;
-  [branch] if ((Flags & kFlagDepth) != 0u && Rim > 0.0) {
+  [branch] if ((Flags & kFlagDepth) != 0u && (Rim > 0.0 || (Flags & kFlagRimShow) != 0u)) {
     const float2 centre = float2(pixel) + 0.5;
     const float w_centre = InverseDepthAt(centre);
     // The sky has no near side.
@@ -189,5 +192,7 @@ void main(uint3 dispatch_id : SV_DispatchThreadID) {
     }
     guide = log2(max(Luminance(sum / max(weight, 1e-12)), kGuideFloor));
   }
-  LookOutput[pixel] = float4(SrgbEncode(x.n * exp2(x.t * (shaped - x.e))), guide);
+  float3 shaped_linear = x.n * exp2(x.t * (shaped - x.e));
+  if ((Flags & kFlagRimShow) != 0u) shaped_linear *= lerp(1.0, kRimShowTint, silhouette);
+  LookOutput[pixel] = float4(SrgbEncode(shaped_linear), guide);
 }

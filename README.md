@@ -181,10 +181,11 @@ Under **Adjust NR's look** (`NRLookMode=1`):
 | Overlay | `ReShade.ini` key | Default | What it does |
 |---|---|---|---|
 | Edit strength | `NRLookStrength` | `1` | Scales NR's whole change, in stops. `2` doubles it. About `1.6`–`1.8` looks like two stacked NR passes for the cost of one. Range 0–3. |
-| Silhouette rim | `NRLookRim` | `0` | Finds the outlines of characters and objects in the game's depth and tames the glow NR puts on their near side. `1` keeps a single pass's glow there whatever the Edit strength; `2` removes it there. Darkening and the rest of the image keep the Edit strength. A road or floor running to the horizon is not an outline. |
-| Rim width | `NRLookRimWidth` | `0.35` | How far in from an outline the rim reaches, in % of the image height. |
+| Silhouette rim | `NRLookRim` | `0` | Finds the outlines of characters and objects in the game's depth and removes the glow NR puts on their near side: the share of the brightening taken away there, at any Edit strength. `0` off, `1` no glow left on the outline. Darkening and the rest of the image keep the Edit strength. A road or floor running to the horizon is not an outline. |
+| Show rim mask | `NRLookRimShow` | `0` | Tints magenta what the rim detects, for tuning. No magenta at all: the game's depth didn't reach the add-on (`ReShade.log` has a `silhouette rim:` line saying why). |
+| Rim width | `NRLookRimWidth` | `0.5` | How far in from an outline the rim reaches, in % of the image height. |
 
-If the rim tames the background beside a character instead of the character, the game declares its depth the wrong way round: change **Depth convention** in the fixes. The rim needs the game's depth and motion vectors in a readable format; otherwise it stays off. In cockpit views the windshield can hide the real depth behind it.
+If the magenta lands on the background beside a character instead of on the character, the game declares its depth the wrong way round: change **Depth convention** in the fixes. The rim needs the game's depth and motion vectors in a readable format; otherwise it stays off. In cockpit views the windshield can hide the real depth behind it.
 
 ## On the roadmap
 
