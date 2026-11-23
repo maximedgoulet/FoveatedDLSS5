@@ -1364,6 +1364,9 @@ inline constexpr float kFoveationCenterW = 50.f;
 inline constexpr float kFoveationCenterH = 50.f;
 inline constexpr float kFoveationContourW = 25.f;
 inline constexpr float kFoveationContourH = 25.f;
+// Off: the contour sliders size the contour and NR is off beyond it.  On: the
+// contour reaches the screen's borders and NR runs everywhere.
+inline constexpr bool kFoveationNoEdge = false;
 // Percent of the contour's per-side thickness: the resolution step from the
 // centre to the midpoint value, and NR's fade into the off zone.
 inline constexpr float kFoveationFalloffPct = 50.f;
@@ -1523,6 +1526,8 @@ inline std::atomic_uint32_t look_stabilize = defaults::kLook.stabilize;
 inline std::atomic<float> look_stabilize_ms = defaults::kLook.stabilize_ms;
 inline std::atomic_bool look_stabilize_detail = defaults::kLook.stabilize_detail;
 inline std::atomic_uint32_t look_upsample = defaults::kLook.upsample;
+inline std::atomic<float> look_rim = defaults::kLook.rim;
+inline std::atomic<float> look_rim_width = defaults::kLook.rim_width;
 inline std::atomic_bool edit_trace_enabled = defaults::kEditTrace;
 // Latched when the look's programs or surfaces could not be created: the
 // look (and the trace) stay off for the session, NR runs on without them.
@@ -1558,6 +1563,7 @@ inline std::atomic<float> nr_foveation_center_w = defaults::kFoveationCenterW;
 inline std::atomic<float> nr_foveation_center_h = defaults::kFoveationCenterH;
 inline std::atomic<float> nr_foveation_contour_w = defaults::kFoveationContourW;
 inline std::atomic<float> nr_foveation_contour_h = defaults::kFoveationContourH;
+inline std::atomic_bool nr_foveation_no_edge = defaults::kFoveationNoEdge;
 inline std::atomic<float> nr_foveation_falloff_pct = defaults::kFoveationFalloffPct;
 inline std::atomic<float> nr_foveation_blend_pct = defaults::kFoveationBlendPct;
 inline std::atomic<float> nr_foveation_edge = defaults::kFoveationEdge;
@@ -1570,15 +1576,20 @@ inline constexpr float kFoveationMinCenterPct = foveation::kMinCenterShare * 100
 // The grid for an output of width x height (uniform when off, when the
 // centre covers the screen, or when it would save under 5% of the NR
 // pixels).  Snapshot once per evaluate: the encode, guides, NR, look and
-// resolve of one frame must agree on it.
+// resolve of one frame must agree on it.  With NRFoveationNoEdge the contour
+// is whatever the centre leaves, so there is no NR-off edge; the stored
+// contour values are kept for when it is turned off.
 inline foveation::Grid CurrentFoveation(
     uint32_t width, uint32_t height, foveation::Inactive* why = nullptr) {
+  const float center_w = nr_foveation_center_w.load() / 100.f;
+  const float center_h = nr_foveation_center_h.load() / 100.f;
+  const bool no_edge = nr_foveation_no_edge.load();
   return foveation::MakeGrid(
       nr_foveation.load(),
-      {.center_w = nr_foveation_center_w.load() / 100.f,
-       .center_h = nr_foveation_center_h.load() / 100.f,
-       .contour_w = nr_foveation_contour_w.load() / 100.f,
-       .contour_h = nr_foveation_contour_h.load() / 100.f,
+      {.center_w = center_w,
+       .center_h = center_h,
+       .contour_w = no_edge ? 1.f - center_w : nr_foveation_contour_w.load() / 100.f,
+       .contour_h = no_edge ? 1.f - center_h : nr_foveation_contour_h.load() / 100.f,
        .falloff = nr_foveation_falloff_pct.load() / 100.f,
        .blend = nr_foveation_blend_pct.load() / 100.f,
        .edge = nr_foveation_edge.load(),
@@ -1717,6 +1728,8 @@ inline look::Settings LookSettingsSnapshot() {
       .stabilize_ms = look_stabilize_ms.load(),
       .stabilize_detail = look_stabilize_detail.load(),
       .upsample = look_upsample.load(),
+      .rim = look_rim.load(),
+      .rim_width = look_rim_width.load(),
   };
 }
 inline std::atomic_uint32_t last_result = NVSDK_NGX_Result_FAIL_NotInitialized;
@@ -1884,6 +1897,21 @@ inline int64_t SteadyNowNs() {
   return std::chrono::duration_cast<std::chrono::nanoseconds>(
              std::chrono::steady_clock::now().time_since_epoch())
       .count();
+}
+
+// Dragging a slider that re-sizes NR's work (the resolution, the foveated
+// zones) pauses NR: every drag frame would otherwise be a new working grid,
+// a fresh NR history and, as it settles, a rebuilt workset - a stutter for
+// the whole drag.  The game's own image shows meanwhile, the zone outlines
+// still draw, and NR comes back once on release (SettleSlider).  The pause
+// is a deadline the overlay refreshes while the drag lasts, so an overlay
+// closed mid-drag cannot leave NR off.
+inline std::atomic<int64_t> nr_paused_until_ns = 0;
+inline constexpr int64_t kDragPauseNs = 250'000'000;
+
+// NR is on and not paused by a drag: every evaluate path asks this.
+inline bool NrRunning() {
+  return enabled.load() && SteadyNowNs() >= nr_paused_until_ns.load(std::memory_order_relaxed);
 }
 
 // Runtime telemetry window (NRTelemetrySeconds, telemetry.hpp; emitted by
@@ -5219,6 +5247,19 @@ inline SkinSteering SentSkinSteering(float structure, float skin, bool auto_mask
   return {(std::min)(structure, 1.f), skin < 0.f ? 1.f : skin};
 }
 
+// The game's depth convention (1 near, 0 far when inverted), or the player's
+// NRDepthMode override.  NR and the look stage's silhouette rim agree on it.
+inline bool DepthInverted(const EvaluationContract& frame) {
+  switch (depth_mode.load()) {
+    case 1:
+      return false;
+    case 2:
+      return true;
+    default:
+      return (frame.create_flags & NVSDK_NGX_DLSS_Feature_Flags_DepthInverted) != 0;
+  }
+}
+
 inline void SetEvaluationParameters(
     FeatureState& state,
     NrFeatureSlot& slot,
@@ -5314,14 +5355,10 @@ inline void SetEvaluationParameters(
     NVSDK_NGX_Parameter_SetF(parameters, "DLSSNR.JitterOffsetX", frame.jitter_x);
     NVSDK_NGX_Parameter_SetF(parameters, "DLSSNR.JitterOffsetY", frame.jitter_y);
   }
-  bool depth_inverted =
-      (frame.create_flags & NVSDK_NGX_DLSS_Feature_Flags_DepthInverted) != 0;
-  if (depth_mode.load() == 1) depth_inverted = false;
-  if (depth_mode.load() == 2) depth_inverted = true;
   NVSDK_NGX_Parameter_SetI(
       parameters,
       "DLSSNR.DepthInverted",
-      depth_inverted ? 1 : 0);
+      DepthInverted(frame) ? 1 : 0);
   NVSDK_NGX_Parameter_SetI(parameters, "DLSSNR.Enabled", 1);
   // Reset semantics with stacking (v5.3 epoch model; see reset_epoch.hpp):
   // the chain's reset epoch is resolved once before the pass loop and every
@@ -6669,8 +6706,8 @@ inline LookRoute RunLookStage(
 
   const D3D12_GPU_DESCRIPTOR_HANDLE heap_gpu =
       res.descriptors->GetGPUDescriptorHandleForHeapStart();
-  // Unused history and motion bind something valid of the declared kind:
-  // the trace histogram (a raw buffer) and the codec set (never read).
+  // Unused history, motion and depth bind something valid of the declared
+  // kind: the trace histogram (a raw buffer) and the codec set (never read).
   look::Bindings bindings{
       .heap = res.descriptors,
       .codec_set = DescriptorHeapSlot(heap_gpu, codec_set, res.descriptor_size),
@@ -6678,6 +6715,7 @@ inline LookRoute RunLookStage(
           heap_gpu, kDescriptorLookSet + codec_set, res.descriptor_size),
       .uav_table = DescriptorHeapSlot(heap_gpu, kDescriptorLookUav, res.descriptor_size),
       .motion = DescriptorHeapSlot(heap_gpu, codec_set, res.descriptor_size),
+      .depth = DescriptorHeapSlot(heap_gpu, codec_set, res.descriptor_size),
       .history_in = res.look_trace_histogram->GetGPUVirtualAddress(),
       .history_out = res.look_trace_histogram->GetGPUVirtualAddress(),
   };
@@ -6792,6 +6830,24 @@ inline LookRoute RunLookStage(
     }
     // Orders this frame's history read after the previous frame's write.
     look::UavBarrierAll(command_list);
+  }
+
+  // Silhouette rim: the game's depth through the foveated guides' write-once
+  // [depth, motion] ring (FovGuideRingSlot), whose set starts with the depth
+  // view.  Without a readable depth MakeConstants turns the rim off.
+  if (settings.rim > 0.f && frame.depth != nullptr && frame.motion != nullptr) {
+    if (const int ring = FovGuideRingSlot(device, res, frame.depth, frame.motion); ring >= 0) {
+      submission::TrackUse(command_list, frame.depth);
+      bindings.depth = DescriptorHeapSlot(
+          heap_gpu, kDescriptorFovGuideRing + static_cast<uint32_t>(ring) * kCodecSrvSetStride,
+          res.descriptor_size);
+      look_frame.depth = true;
+      look_frame.depth_inverted = DepthInverted(frame);
+      look_frame.depth_base[0] = frame.depth_x;
+      look_frame.depth_base[1] = frame.depth_y;
+      look_frame.depth_grid[0] = frame.input_width;
+      look_frame.depth_grid[1] = frame.input_height;
+    }
   }
 
   // The filter flag follows `temporal`, not the setting (v7.0.0-rc9).  After
@@ -7070,7 +7126,7 @@ inline bool ProcessInline(
     const NVSDK_NGX_Handle* handle,
     const NVSDK_NGX_Parameter* game_parameters,
     bool* command_list_touched = nullptr) {
-  if (!enabled.load() || command_list == nullptr || handle == nullptr
+  if (!NrRunning() || command_list == nullptr || handle == nullptr
       || game_parameters == nullptr
       || !IsSupportedInjectionCommandList(command_list)) {
     return false;
@@ -8462,7 +8518,7 @@ inline bool ProcessInlinePreSR(
     // recording started - the bool return alone conflates "injected" with
     // "declined before recording").
     bool* commands_recorded = nullptr) {
-  if (!enabled.load() || !nr_before_upscale.load() || command_list == nullptr
+  if (!NrRunning() || !nr_before_upscale.load() || command_list == nullptr
       || handle == nullptr || game_parameters == nullptr
       || !IsSupportedInjectionCommandList(command_list)) {
     return false;
@@ -9594,7 +9650,7 @@ inline bool ProcessStreamlineInline(
   // finished DLSS output.  With the pre-SR insertion point selected the two
   // are mutually exclusive, exactly as for the NGX evaluate path - except for
   // Ray Reconstruction, which keeps the after insertion point (PreSrTakes).
-  if (!enabled.load()
+  if (!NrRunning()
       || (nr_before_upscale.load() && streamline_feature != sl::kFeatureDLSS_RR)
       || command_list == nullptr
       || !IsSupportedInjectionCommandList(command_list)) {
@@ -12255,7 +12311,7 @@ inline NVSDK_NGX_Result NVSDK_CONV HookedEvaluateFeatureSlot(
   PreSrSwap pre_sr;
   if (!nested_in_c_wrapper && !InsideDirectCall()) {
     RuntimeLock lock(runtime_mutex);
-    if (enabled.load()
+    if (NrRunning()
         && handle != nullptr && parameters != nullptr
         && PreSrTakes(handle) && !NrYieldsToForeign()
         && !NrWaitsForTeardown(command_list)
@@ -12311,7 +12367,7 @@ inline NVSDK_NGX_Result NVSDK_CONV HookedEvaluateFeatureSlot(
     CountNrDecline(NrDeclineReason::kGameEvaluateFailed);
     return result;
   }
-  if (!enabled.load()) {
+  if (!NrRunning()) {
     CountNrDecline(NrDeclineReason::kNrDisabledEvaluation);
     return result;
   }
@@ -12424,7 +12480,7 @@ inline NVSDK_NGX_Result NVSDK_CONV HookedEvaluateFeatureCSlot(
   PreSrSwap pre_sr;
   if (!InsideDirectCall()) {
     RuntimeLock lock(runtime_mutex);
-    if (enabled.load()
+    if (NrRunning()
         && handle != nullptr && parameters != nullptr
         && PreSrTakes(handle) && !NrYieldsToForeign()
         && !NrWaitsForTeardown(command_list)
@@ -12456,7 +12512,7 @@ inline NVSDK_NGX_Result NVSDK_CONV HookedEvaluateFeatureCSlot(
   inside_game_evaluate_wrapper = false;
   state_envelope.StopCapture();
   RestorePreSrColor(parameters, pre_sr);
-  if (InsideDirectCall() || NVSDK_NGX_FAILED(result) || !enabled.load()
+  if (InsideDirectCall() || NVSDK_NGX_FAILED(result) || !NrRunning()
       || handle == nullptr || parameters == nullptr) {
     return result;
   }
@@ -14957,12 +15013,15 @@ inline void EmitTelemetry(int64_t now_ns, bool force = false) {
              << " foveation=" << nr_foveation.load() << ":centre "
              << nr_foveation_center_w.load() << 'x' << nr_foveation_center_h.load()
              << "% contour " << nr_foveation_contour_w.load() << 'x'
-             << nr_foveation_contour_h.load() << "% falloff "
+             << nr_foveation_contour_h.load() << "% no_edge " << nr_foveation_no_edge.load()
+             << " falloff "
              << nr_foveation_falloff_pct.load() << "% blend " << nr_foveation_blend_pct.load()
              << "% midpoint " << nr_foveation_edge.load() << " @"
              << nr_foveation_center_x.load() << ',' << nr_foveation_center_y.load()
              << " follow_input=" << nr_follow_input_res.load()
-             << " look=" << look_mode.load() << " stabilize=" << look_stabilize.load()
+             << " look=" << look_mode.load() << " strength=" << look_strength.load()
+             << " rim=" << look_rim.load() << '/' << look_rim_width.load()
+             << "% stabilize=" << look_stabilize.load()
              << " upsample=" << look_upsample.load() << " codec=" << codec_mode.load()
              << " feed=" << feed_mode.load() << " governor=" << norm_governor.load();
     static std::string logged_settings;
@@ -15525,6 +15584,9 @@ inline constexpr Setting kSetFoveationContourW{
 inline constexpr Setting kSetFoveationContourH{
     "NRFoveationContourH", &nr_foveation_contour_h, defaults::kFoveationContourH,
     SettingEffect::kNone};
+inline constexpr Setting kSetFoveationNoEdge{
+    "NRFoveationNoEdge", &nr_foveation_no_edge, defaults::kFoveationNoEdge,
+    SettingEffect::kNone};
 inline constexpr Setting kSetFoveationFalloffPct{
     "NRFoveationFalloffPct", &nr_foveation_falloff_pct, defaults::kFoveationFalloffPct,
     SettingEffect::kNone};
@@ -15715,6 +15777,10 @@ inline constexpr Setting kSetLookStabilizeDetail{
     SettingEffect::kNone};
 inline constexpr Setting kSetLookUpsample{
     "NRLookUpsample", &look_upsample, defaults::kLook.upsample, SettingEffect::kNone};
+inline constexpr Setting kSetLookRim{
+    "NRLookRim", &look_rim, defaults::kLook.rim, SettingEffect::kNone};
+inline constexpr Setting kSetLookRimWidth{
+    "NRLookRimWidth", &look_rim_width, defaults::kLook.rim_width, SettingEffect::kNone};
 
 // The HDR colour bridge: an Encoding or Linear Unit change recreates the
 // worksets, because the linear working surfaces and descriptor views are
@@ -15800,7 +15866,8 @@ inline constexpr const Setting* kLookSettings[] = {
     &kSetLocalStructure, &kSetSkinStructure, &kSetSkinIndependent,
     &kSetAutoMask,       &kSetUiCorrection};
 inline constexpr const Setting* kLookResultSettings[] = {
-    &kSetLookMode,        &kSetLookStrength,     &kSetLookBrighten,
+    &kSetLookMode,        &kSetLookStrength,     &kSetLookRim,
+    &kSetLookRimWidth,    &kSetLookBrighten,
     &kSetLookDarken,      &kSetLookColour,       &kSetLookHue,
     &kSetLookShadows,     &kSetLookMidtones,     &kSetLookHighlights,
     &kSetLookMaxBrighten, &kSetLookMaxDarken,    &kSetLookMaxColour,
@@ -15810,7 +15877,8 @@ inline constexpr const Setting* kLookResultSettings[] = {
 inline constexpr const Setting* kPerformanceSettings[] = {
     &kSetPreSr,           &kSetFollowInputRes, &kSetResolutionScale,
     &kSetFoveation,       &kSetFoveationCenterW, &kSetFoveationCenterH,
-    &kSetFoveationContourW, &kSetFoveationContourH, &kSetFoveationFalloffPct,
+    &kSetFoveationContourW, &kSetFoveationContourH, &kSetFoveationNoEdge,
+    &kSetFoveationFalloffPct,
     &kSetFoveationBlendPct, &kSetFoveationEdge, &kSetFoveationCenterX,
     &kSetFoveationCenterY, &kSetFoveationPreview, &kSetLookUpsample};
 inline constexpr const Setting* kStackingSettings[] = {
@@ -15998,11 +16066,32 @@ inline void SetNrEnabledFromUi(bool on) {
 // OnOverlay settles once more after the panel, so a slider that stops being
 // drawn mid-drag still applies.
 inline const Setting* slider_pending = nullptr;
+// A drag that pauses NR (nr_paused_until_ns): the overlay thread's own flag.
+inline bool slider_pausing_nr = false;
+
+// Starts or extends the drag pause.  A keyboard or gamepad step has no
+// button down and applies at once, with NR running.
+inline void PauseNrForDrag() {
+  if (!ImGui::IsMouseDown(0)) return;
+  slider_pausing_nr = true;
+  nr_paused_until_ns = SteadyNowNs() + kDragPauseNs;
+}
+
 inline void SettleSlider(bool now) {
   if (slider_pending != nullptr && (now || !ImGui::IsMouseDown(0))) {
     slider_pending->Persist();
     ApplySettingEffect(slider_pending->effect);
     slider_pending = nullptr;
+  }
+  if (!slider_pausing_nr) return;
+  if (ImGui::IsMouseDown(0)) {
+    nr_paused_until_ns = SteadyNowNs() + kDragPauseNs;
+  } else {
+    // Released: NR resumes on the final value, built at once rather than
+    // after the working-resolution debounce.
+    slider_pausing_nr = false;
+    nr_paused_until_ns = 0;
+    nr_resolution_commit_now = true;
   }
 }
 
@@ -16035,6 +16124,11 @@ inline void SliderSetting(const ui::PanelText& text, const Setting& setting,
     if (slider_pending != &setting) SettleSlider(true);
     setting.Store(value);
     slider_pending = &setting;
+    // The performance sliders re-size NR's working grid; a re-create rebuilds
+    // NR itself.  The look's sliders reshape NR's result live and keep it on.
+    const bool resizes_nr =
+        std::ranges::find(kPerformanceSettings, &setting) != std::end(kPerformanceSettings);
+    if (resizes_nr || setting.effect == SettingEffect::kRecreate) PauseNrForDrag();
   }
   SettleSlider(false);
   if (text.modern && setting.Modified()) {
@@ -16240,10 +16334,26 @@ inline void DrawSectionLookResult(const ui::PanelText& text) {
   }
   ImGui::BeginDisabled(!look_mode.load());
   SliderSetting(
-      text, kSetLookStrength, "Edit strength", 0.f, 2.f, "%.2f",
+      text, kSetLookStrength, "Edit strength", 0.f, 3.f, "%.2f",
       "Scales the whole change Neural Rendering made, in stops: 0 takes it"
-      " away, 1 keeps it, 2 doubles it.  Strength steers the model; this"
+      " away, 1 keeps it, 2 doubles it.  About 1.6 to 1.8 gives the look of two"
+      " stacked passes for the cost of one.  Strength steers the model; this"
       " reshapes its result.");
+  SliderSetting(
+      text, kSetLookRim, "Silhouette rim", 0.f, 2.f, "%.2f",
+      "Tames the glow on the edge of characters and objects, found from the"
+      " game's depth.  0 off; 1 keeps a single pass's glow there whatever the"
+      " Edit strength; 2 removes the glow there.  Only brightening on the near"
+      " side of an outline changes; the rest of the image keeps the Edit"
+      " strength.  If it tames the background beside a character instead of"
+      " the character, the game declares its depth the wrong way round: change"
+      " the Depth convention in the fixes.");
+  ImGui::BeginDisabled(look_rim.load() <= 0.f);
+  SliderSetting(
+      text, kSetLookRimWidth, "Rim width", 0.1f, 2.f, "%.2f%%",
+      "How far in from an outline the rim reaches, as a share of the image"
+      " height.");
+  ImGui::EndDisabled();
   SliderSetting(
       text, kSetLookBrighten, "Brightening", 0.f, 2.f, "%.2f",
       "How much of the model's brightening is kept: 0 drops it, 2 doubles it.");
@@ -16372,7 +16482,7 @@ inline const Setting* foveation_contour_unsaved[2] = {nullptr, nullptr};
 inline void FoveationAxisSliders(const ui::PanelText& text, int axis, const Setting& centre,
                                  const Setting& contour, const char* centre_label,
                                  const char* centre_tip, const char* contour_label,
-                                 const char* contour_tip) {
+                                 const char* contour_tip, bool contour_to_edges) {
   SliderSetting(text, centre, centre_label, kFoveationMinCenterPct, 100.f, "%.0f%%",
                 centre_tip);
   const float room = (std::max)(0.f, 100.f - centre.Get());
@@ -16384,7 +16494,18 @@ inline void FoveationAxisSliders(const ui::PanelText& text, int axis, const Sett
     foveation_contour_unsaved[axis]->Persist();
     foveation_contour_unsaved[axis] = nullptr;
   }
-  if (room >= 1.f) {
+  if (contour_to_edges) {
+    // Greyed out at what runs: everything the centre leaves.
+    float shown = room;
+    ImGui::BeginDisabled(true);
+    if (text.modern) {
+      ui::RowLabel(contour_label, contour_tip);
+      ui::Slider("##contour_to_edges", &shown, 0.f, 100.f, "%.0f%%", contour_tip);
+    } else {
+      ImGui::SliderFloat(contour_label, &shown, 0.f, 100.f, "%.0f%%");
+    }
+    ImGui::EndDisabled();
+  } else if (room >= 1.f) {
     SliderSetting(text, contour, contour_label, 0.f, room, "%.0f%%", contour_tip);
   } else if (text.modern) {
     ui::RowLabel(contour_label, contour_tip);
@@ -16630,6 +16751,7 @@ inline void DrawSectionStackingResolution(const ui::PanelText& text) {
     if (live_scale != nr_resolution_scale.load()) {
       nr_resolution_scale = live_scale;
       kSetResolutionScale.Persist();
+      PauseNrForDrag();
     }
   } else if (text.modern) {
     ui::RowLabel("Resolution scale", kScaleTip);
@@ -16673,6 +16795,15 @@ inline void DrawSectionStackingResolution(const ui::PanelText& text) {
       const foveation::Grid grid = CurrentFoveation(map_w, map_h, &why);
       DrawFoveationMap(text, grid, why, map_w, map_h);
       DrawFoveationForecast(text, grid, why, map_w, map_h);
+      const bool was_no_edge = nr_foveation_no_edge.load();
+      ToggleSetting(
+          text, kSetFoveationNoEdge, "Contour to the screen edges",
+          "The low-resolution contour reaches the borders of the screen: no edge"
+          " where Neural Rendering is off, just the centre at full resolution and"
+          " the contour all around it.  Contour width, Contour height and Fade to"
+          " the edge then have nothing to set and are greyed out.");
+      if (nr_foveation_no_edge.load() != was_no_edge) nr_resolution_commit_now = true;
+      const bool no_edge = nr_foveation_no_edge.load();
       FoveationAxisSliders(
           text, 0, kSetFoveationCenterW, kSetFoveationContourW, "Centre width",
           "Width of the full-resolution centre zone, in percent of the screen width.",
@@ -16680,7 +16811,8 @@ inline void DrawSectionStackingResolution(const ui::PanelText& text) {
           "Width added around the centre zone at the contour resolution, in percent"
           " of the screen width, both sides together (25% = 12.5% per side).  What"
           " the centre and the contour leave is the edge, where Neural Rendering is"
-          " off.");
+          " off.",
+          no_edge);
       FoveationAxisSliders(
           text, 1, kSetFoveationCenterH, kSetFoveationContourH, "Centre height",
           "Height of the full-resolution centre zone, in percent of the screen"
@@ -16688,11 +16820,12 @@ inline void DrawSectionStackingResolution(const ui::PanelText& text) {
           "Contour height",
           "Height added around the centre zone at the contour resolution, in"
           " percent of the screen height, both sides together.  In cockpit views a"
-          " small value cuts the roof and the sky.");
+          " small value cuts the roof and the sky.",
+          no_edge);
       {
-        const float off_w = (std::max)(
+        const float off_w = no_edge ? 0.f : (std::max)(
             0.f, 100.f - nr_foveation_center_w.load() - nr_foveation_contour_w.load());
-        const float off_h = (std::max)(
+        const float off_h = no_edge ? 0.f : (std::max)(
             0.f, 100.f - nr_foveation_center_h.load() - nr_foveation_contour_h.load());
         constexpr const char* kEdgeTip =
             "What is left of the screen after the centre and the contour: Neural"
@@ -16732,11 +16865,13 @@ inline void DrawSectionStackingResolution(const ui::PanelText& text) {
           "How gradually the resolution steps down from the centre to the contour,"
           " in percent of the contour's thickness.  0% is a hard step at the"
           " centre's border; 100% ramps across the whole contour.");
+      ImGui::BeginDisabled(no_edge);
       SliderSetting(
           text, kSetFoveationBlendPct, "Fade to the edge", 0.f, 100.f, "%.0f%%",
           "How far inside the contour Neural Rendering fades out toward the edge,"
           " in percent of the contour's thickness, so the border to the game's own"
           " image is soft.");
+      ImGui::EndDisabled();
       constexpr const char* kPreviewModes[] = {"Off", "Menu open", "Always"};
       ChoiceSetting(
           text, kSetFoveationPreview, "Show zones on screen", kPreviewModes,
@@ -17581,6 +17716,7 @@ inline std::string BuildSupportReport() {
          << " NRFoveationCenterH=" << nr_foveation_center_h.load()
          << " NRFoveationContourW=" << nr_foveation_contour_w.load()
          << " NRFoveationContourH=" << nr_foveation_contour_h.load()
+         << " NRFoveationNoEdge=" << nr_foveation_no_edge.load()
          << " NRFoveationFalloffPct=" << nr_foveation_falloff_pct.load()
          << " NRFoveationBlendPct=" << nr_foveation_blend_pct.load()
          << " NRFoveationEdge=" << nr_foveation_edge.load()
@@ -18495,6 +18631,8 @@ inline void LoadConfiguration() {
   reshade::get_config_value(
       nullptr, kConfigSection, "NRLookStabilizeDetail", saved_look.stabilize_detail);
   reshade::get_config_value(nullptr, kConfigSection, "NRLookUpsample", saved_look.upsample);
+  reshade::get_config_value(nullptr, kConfigSection, "NRLookRim", saved_look.rim);
+  reshade::get_config_value(nullptr, kConfigSection, "NRLookRimWidth", saved_look.rim_width);
   // Diagnostics, read-only from the ini (never persisted): the telemetry line
   // interval (0 = off) and the per-frame normalization trace.
   uint32_t saved_telemetry_seconds = telemetry_seconds.load();
@@ -18824,6 +18962,7 @@ inline void LoadConfiguration() {
     float saved_center_h = defaults::kFoveationCenterH;
     float saved_contour_w = defaults::kFoveationContourW;
     float saved_contour_h = defaults::kFoveationContourH;
+    bool saved_no_edge = defaults::kFoveationNoEdge;
     float saved_falloff = defaults::kFoveationFalloffPct;
     float saved_blend = defaults::kFoveationBlendPct;
     float saved_edge = defaults::kFoveationEdge;
@@ -18835,6 +18974,7 @@ inline void LoadConfiguration() {
     reshade::get_config_value(nullptr, kConfigSection, "NRFoveationCenterH", saved_center_h);
     reshade::get_config_value(nullptr, kConfigSection, "NRFoveationContourW", saved_contour_w);
     reshade::get_config_value(nullptr, kConfigSection, "NRFoveationContourH", saved_contour_h);
+    reshade::get_config_value(nullptr, kConfigSection, "NRFoveationNoEdge", saved_no_edge);
     reshade::get_config_value(nullptr, kConfigSection, "NRFoveationFalloffPct", saved_falloff);
     reshade::get_config_value(nullptr, kConfigSection, "NRFoveationBlendPct", saved_blend);
     reshade::get_config_value(nullptr, kConfigSection, "NRFoveationEdge", saved_edge);
@@ -18857,6 +18997,7 @@ inline void LoadConfiguration() {
         SanitizeFloatKey(saved_contour_h, defaults::kFoveationContourH, 0.f, 100.f,
                          "NRFoveationContourH"),
         100.f - nr_foveation_center_h.load());
+    nr_foveation_no_edge = saved_no_edge;
     nr_foveation_falloff_pct = SanitizeFloatKey(
         saved_falloff, defaults::kFoveationFalloffPct, 0.f, 100.f, "NRFoveationFalloffPct");
     nr_foveation_blend_pct = SanitizeFloatKey(
@@ -18877,7 +19018,10 @@ inline void LoadConfiguration() {
   edit_trace_enabled = saved_edit_trace;
   look_mode = saved_look_mode;
   look_strength = SanitizeFloatKey(
-      saved_look.strength, defaults::kLook.strength, 0.f, 2.f, "NRLookStrength");
+      saved_look.strength, defaults::kLook.strength, 0.f, 3.f, "NRLookStrength");
+  look_rim = SanitizeFloatKey(saved_look.rim, defaults::kLook.rim, 0.f, 2.f, "NRLookRim");
+  look_rim_width = SanitizeFloatKey(
+      saved_look.rim_width, defaults::kLook.rim_width, 0.1f, 2.f, "NRLookRimWidth");
   look_brighten = SanitizeFloatKey(
       saved_look.brighten, defaults::kLook.brighten, 0.f, 2.f, "NRLookBrighten");
   look_darken = SanitizeFloatKey(

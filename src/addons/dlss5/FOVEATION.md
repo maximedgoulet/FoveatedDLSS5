@@ -57,6 +57,7 @@ background list from ReShade's overlay pass; drawing only).
 | `NRFoveation` | 0 | 1 = on |
 | `NRFoveationCenterW` / `NRFoveationCenterH` | 50 / 50 | centre zone, % of the width / height |
 | `NRFoveationContourW` / `NRFoveationContourH` | 25 / 25 | contour thickness, % of the width / height, both sides together |
+| `NRFoveationNoEdge` | 0 | 1 = the contour reaches the screen borders: contour = 100 − centre per axis, no NR-off edge (the stored contour values are kept, unused); Contour W/H and Blend are greyed out |
 | `NRFoveationFalloffPct` | 50 | resolution fall-off, % of the contour's per-side thickness |
 | `NRFoveationBlendPct` | 25 | NR fade into the edge, % of the contour's per-side thickness |
 | `NRFoveationEdge` | 0.50 | contour density, per axis (0.25–1.0) |

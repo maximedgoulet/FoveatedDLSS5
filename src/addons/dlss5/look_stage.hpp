@@ -36,6 +36,10 @@ constexpr uint32_t kFlagTemporalDetail = 1u << 3;
 constexpr uint32_t kFlagTransport = 1u << 4;
 constexpr uint32_t kFlagRefLinear = 1u << 5;
 constexpr uint32_t kFlagHistoryValid = 1u << 6;
+// The game's depth is bound (t5) for the silhouette rim; Inverted when the
+// game's depth runs 1 near, 0 far.
+constexpr uint32_t kFlagDepth = 1u << 7;
+constexpr uint32_t kFlagDepthInverted = 1u << 8;
 
 // Root parameters.
 enum : uint32_t {
@@ -45,7 +49,8 @@ enum : uint32_t {
   kRootHistoryIn = 3,   // u10: root UAV
   kRootHistoryOut = 4,  // u9: root UAV
   kRootMotion = 5,      // t4: one motion-vector view
-  kRootParameterCount = 6,
+  kRootDepth = 6,       // t5: one depth view
+  kRootParameterCount = 7,
 };
 
 // The UAV table, relative to its base.
@@ -109,12 +114,23 @@ struct Constants {
   float foveation_center[2];
   uint32_t foveation_bounds[2];
   float foveation_blend[2];
+  // Silhouette rim, dwords 40..47: the depth subrect (texels) and the grid it
+  // is rendered at, the rim amount (0..2) and its reach in NR pixels.
+  uint32_t depth_base[2];
+  uint32_t depth_grid[2];
+  float rim;
+  float rim_radius;
+  uint32_t padding1[2];
 };
+// 48 constants + four tables + two root UAVs (2 each) = 56 of the 64 DWORDs
+// a root signature may hold.
 static_assert(
-    sizeof(Constants) == 40 * sizeof(uint32_t),
-    "the look root signature declares exactly 40 32-bit constants");
+    sizeof(Constants) == 48 * sizeof(uint32_t),
+    "the look root signature declares exactly 48 32-bit constants");
 static_assert(offsetof(Constants, foveation) == 32 * sizeof(uint32_t),
               "LookConstants.Foveation is dword 32");
+static_assert(offsetof(Constants, depth_base) == 40 * sizeof(uint32_t),
+              "LookConstants.DepthBase is dword 40");
 
 // The player's look values.  Every default is the identity.
 struct Settings {
@@ -137,6 +153,10 @@ struct Settings {
   float stabilize_ms = 60.f;
   bool stabilize_detail = false;
   uint32_t upsample = 0;      // 0 classic, 1 edge-aware
+  // Silhouette rim: on the near side of a depth edge, brightening falls back
+  // from Strength toward a single pass (1) and then toward none (2); 0 off.
+  float rim = 0.f;
+  float rim_width = 0.35f;  // percent of the NR height
 };
 
 // Every per-pixel gain is the identity: the compose would return N.
@@ -145,7 +165,7 @@ inline bool GainsNeutral(const Settings& s) {
       && s.max_brighten <= 0.f && s.max_darken <= 0.f && s.colour == 1.f
       && s.hue == 1.f && s.max_colour <= 0.f && s.shadows == 1.f
       && s.midtones == 1.f && s.highlights == 1.f && s.tone == 1.f
-      && s.detail == 1.f && s.halo <= 0.f;
+      && s.detail == 1.f && s.halo <= 0.f && s.rim <= 0.f;
 }
 
 inline bool BandsWanted(const Settings& s) {
@@ -186,6 +206,12 @@ struct Frame {
   float foveation_center[2] = {0.5f, 0.5f};
   uint32_t foveation_bounds[2] = {0, 0};
   float foveation_blend[2] = {0.f, 0.f};
+  // The game's depth for the silhouette rim: bound, its convention, its
+  // subrect and the grid it is rendered at.
+  bool depth = false;
+  bool depth_inverted = false;
+  uint32_t depth_base[2] = {0, 0};
+  uint32_t depth_grid[2] = {1, 1};
 };
 
 inline uint32_t BandRadius(const Settings& s, uint32_t nr_height) {
@@ -208,7 +234,9 @@ inline Constants MakeConstants(const Settings& s, const Frame& f) {
       | (temporal && s.stabilize_detail ? kFlagTemporalDetail : 0u)
       | (f.transport ? kFlagTransport : 0u)
       | (f.reference_linear ? kFlagRefLinear : 0u)
-      | (temporal && f.history_valid ? kFlagHistoryValid : 0u);
+      | (temporal && f.history_valid ? kFlagHistoryValid : 0u)
+      | (f.depth ? kFlagDepth : 0u)
+      | (f.depth && f.depth_inverted ? kFlagDepthInverted : 0u);
   c.strength = s.strength;
   c.brighten = s.brighten;
   c.darken = s.darken;
@@ -242,6 +270,13 @@ inline Constants MakeConstants(const Settings& s, const Frame& f) {
   c.foveation_bounds[1] = f.foveation_bounds[1];
   c.foveation_blend[0] = f.foveation_blend[0];
   c.foveation_blend[1] = f.foveation_blend[1];
+  c.depth_base[0] = f.depth_base[0];
+  c.depth_base[1] = f.depth_base[1];
+  c.depth_grid[0] = std::max(f.depth_grid[0], 1u);
+  c.depth_grid[1] = std::max(f.depth_grid[1], 1u);
+  // Without depth there are no silhouettes to find: the rim is off.
+  c.rim = f.depth ? std::clamp(s.rim, 0.f, 2.f) : 0.f;
+  c.rim_radius = std::max(s.rim_width * 0.01f * static_cast<float>(f.nr_height), 1.f);
   return c;
 }
 
@@ -251,7 +286,7 @@ inline HRESULT SerializeRootSignature(
     PFN_D3D12_SERIALIZE_ROOT_SIGNATURE serialize,
     ID3DBlob** blob,
     ID3DBlob** errors) {
-  D3D12_DESCRIPTOR_RANGE ranges[3]{};
+  D3D12_DESCRIPTOR_RANGE ranges[4]{};
   ranges[0].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
   ranges[0].NumDescriptors = 4;
   ranges[0].BaseShaderRegister = 0;
@@ -261,6 +296,9 @@ inline HRESULT SerializeRootSignature(
   ranges[2].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
   ranges[2].NumDescriptors = 1;
   ranges[2].BaseShaderRegister = 4;
+  ranges[3].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+  ranges[3].NumDescriptors = 1;
+  ranges[3].BaseShaderRegister = 5;
   D3D12_ROOT_PARAMETER parameters[kRootParameterCount]{};
   parameters[kRootSrvSet].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
   parameters[kRootSrvSet].DescriptorTable.NumDescriptorRanges = 1;
@@ -278,6 +316,9 @@ inline HRESULT SerializeRootSignature(
   parameters[kRootMotion].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
   parameters[kRootMotion].DescriptorTable.NumDescriptorRanges = 1;
   parameters[kRootMotion].DescriptorTable.pDescriptorRanges = &ranges[2];
+  parameters[kRootDepth].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+  parameters[kRootDepth].DescriptorTable.NumDescriptorRanges = 1;
+  parameters[kRootDepth].DescriptorTable.pDescriptorRanges = &ranges[3];
   D3D12_ROOT_SIGNATURE_DESC desc{};
   desc.NumParameters = kRootParameterCount;
   desc.pParameters = parameters;
@@ -295,13 +336,14 @@ struct Pipeline {
 // Everything one pass's look dispatches bind.  Every table and root
 // descriptor must be valid even where a program's path does not read it
 // (the shaders declare the full layout): the caller points unused history at
-// any buffer in UAV state and unused motion at any SRV.
+// any buffer in UAV state and unused motion and depth at any SRV.
 struct Bindings {
   ID3D12DescriptorHeap* heap = nullptr;
   D3D12_GPU_DESCRIPTOR_HANDLE codec_set{};  // [ref, P, N, ref|norm]
   D3D12_GPU_DESCRIPTOR_HANDLE look_set{};   // [ref, P, N', ref|norm]
   D3D12_GPU_DESCRIPTOR_HANDLE uav_table{};  // kUav* region
   D3D12_GPU_DESCRIPTOR_HANDLE motion{};
+  D3D12_GPU_DESCRIPTOR_HANDLE depth{};
   D3D12_GPU_VIRTUAL_ADDRESS history_in = 0;
   D3D12_GPU_VIRTUAL_ADDRESS history_out = 0;
 };
@@ -321,6 +363,7 @@ inline void Bind(
   list->SetComputeRootUnorderedAccessView(kRootHistoryIn, bindings.history_in);
   list->SetComputeRootUnorderedAccessView(kRootHistoryOut, bindings.history_out);
   list->SetComputeRootDescriptorTable(kRootMotion, bindings.motion);
+  list->SetComputeRootDescriptorTable(kRootDepth, bindings.depth);
 }
 
 // Every look pass reads what the previous one wrote through UAVs only, so a

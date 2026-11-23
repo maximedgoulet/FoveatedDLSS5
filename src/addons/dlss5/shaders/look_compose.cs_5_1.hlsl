@@ -27,6 +27,36 @@ float4 LoadHistory(uint2 pixel, out float history_i) {
                 f16tof32(words.y), f16tof32(words.y >> 16));
 }
 
+// Inverse view distance w (up to a constant) at a position on the NR grid,
+// in NR pixels: the game's depth looked up at that position's full-frame
+// texel (through the foveated warp).  With an inverted depth w is the depth
+// itself (reversed Z is n / z); otherwise 1 - d, which is n / z wherever z is
+// well short of the far plane.  The sky is w = 0, infinitely far.
+float InverseDepthAt(float2 work_pos) {
+  float2 n = work_pos / float2(NrSize);
+  [branch] if (FovAny(Foveation)) {
+    n = FovUnwarp(n, Foveation, FoveationCenter, FoveationBounds);
+  }
+  const uint2 texel = DepthBase + min(uint2(saturate(n) * float2(DepthGrid)), DepthGrid - 1u);
+  const float d = Depth.Load(int3(texel, 0));
+  return (Flags & kFlagDepthInverted) != 0u ? d : 1.0 - d;
+}
+
+// Silhouette rim: 1 on the near side of a depth edge within RimRadius NR
+// pixels, falling off with distance.  w is affine across any plane in screen
+// space, so each tap is compared with the plane through the centre and its
+// opposite tap: a floor or a road running to the horizon predicts its own
+// taps and scores 0; a character against a farther background does not.
+// Only the near side counts (the tap farther than the plane predicts), where
+// NR's rim glow sits on the skin.  Rings at 1/3, 2/3 and 3/3 of the radius.
+static const float kRimStepLo = 0.15;  // stops of distance ratio: no edge
+static const float kRimStepHi = 0.5;   // full edge (about 1.4x the distance)
+static const float kWFloor = 1e-7;
+static const float2 kRimDirections[8] = {
+    float2(1.0, 0.0), float2(0.7071, 0.7071), float2(0.0, 1.0), float2(-0.7071, 0.7071),
+    float2(-1.0, 0.0), float2(-0.7071, -0.7071), float2(0.0, -1.0), float2(0.7071, -0.7071)};
+static const float kRimRingWeights[3] = {1.0, 0.8, 0.5};
+
 [numthreads(16, 16, 1)]
 void main(uint3 dispatch_id : SV_DispatchThreadID) {
   const int2 pixel = int2(dispatch_id.xy);
@@ -109,7 +139,30 @@ void main(uint3 dispatch_id : SV_DispatchThreadID) {
     c = float3(current.z, -(kW.x * current.z + kW.z * current.w) / kW.y, current.w);
   }
 
-  const float3 shaped = ShapeEdit(x, current.x, current.y, c, peak);
+  float silhouette = 0.0;
+  [branch] if ((Flags & kFlagDepth) != 0u && Rim > 0.0) {
+    const float2 centre = float2(pixel) + 0.5;
+    const float w_centre = InverseDepthAt(centre);
+    // The sky has no near side.
+    [branch] if (w_centre > kWFloor) {
+      const float2 lo = 0.5;
+      const float2 hi = float2(NrSize) - 0.5;
+      [unroll] for (int ring = 0; ring < 3; ++ring) {
+        const float radius = RimRadius * float(ring + 1) / 3.0;
+        float w[8];
+        [unroll] for (int i = 0; i < 8; ++i) {
+          w[i] = InverseDepthAt(clamp(centre + kRimDirections[i] * radius, lo, hi));
+        }
+        [unroll] for (int j = 0; j < 8; ++j) {
+          const float w_plane = 2.0 * w_centre - w[(j + 4) & 7];
+          const float stops = log2(max(w_plane, kWFloor) / max(w[j], kWFloor));
+          silhouette = max(
+              silhouette, kRimRingWeights[ring] * smoothstep(kRimStepLo, kRimStepHi, stops));
+        }
+      }
+    }
+  }
+  const float3 shaped = ShapeEdit(x, current.x, current.y, c, peak, silhouette);
   float guide = 1.0;
   if ((Flags & kFlagTransport) != 0u) {
     // v6_encode's area footprint over the reference.

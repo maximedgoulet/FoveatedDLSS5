@@ -17,6 +17,9 @@ Texture2D<float4> Proxy : register(t1);      // P, the NR input (sRGB-encoded)
 Texture2D<float4> Neural : register(t2);     // N, or N' in the look set
 // Root parameter 5: one view of the workset's motion-vector ring.
 Texture2D<float2> Motion : register(t4);
+// Root parameter 6: the game's depth (the foveated guide ring's depth view),
+// read only with kFlagDepth.
+Texture2D<float> Depth : register(t5);
 // Root parameter 1: the workset's look UAV region, all resting in
 // UNORDERED_ACCESS.
 RWTexture2D<float4> LookOutput : register(u0);  // N' (NR res; .a = G_low)
@@ -34,7 +37,7 @@ RWTexture2D<float4> TraceBlocks : register(u8);
 RWByteAddressBuffer HistoryOut : register(u9);
 RWByteAddressBuffer HistoryIn : register(u10);
 
-// 32 root constants; LookConstants in look_stage.hpp mirrors it.
+// 48 root constants; LookConstants in look_stage.hpp mirrors it.
 cbuffer LookConstants : register(b0) {
   uint2 Size;       // this dispatch's grid
   uint2 NrSize;     // the NR working resolution (P, N, N', history)
@@ -70,6 +73,12 @@ cbuffer LookConstants : register(b0) {
   // and the NR-off blend width, normalized (foveation.hlsli).
   uint2 FoveationBounds;
   float2 FoveationBlend;
+  // Silhouette rim, dwords 40..47.
+  uint2 DepthBase;    // depth subrect origin, texels
+  uint2 DepthGrid;    // the pixel grid the depth is rendered at
+  float Rim;          // 0 off, 1 one pass at silhouettes, 2 no brightening
+  float RimRadius;    // reach, NR pixels
+  uint2 Padding1;
 };
 
 static const uint kFlagBands = 1u << 0;
@@ -79,6 +88,8 @@ static const uint kFlagTemporalDetail = 1u << 3;
 static const uint kFlagTransport = 1u << 4;
 static const uint kFlagRefLinear = 1u << 5;
 static const uint kFlagHistoryValid = 1u << 6;
+static const uint kFlagDepth = 1u << 7;
+static const uint kFlagDepthInverted = 1u << 8;
 
 static const float kRatioFloor = 1.0 / 1024.0;  // v6_resolve's N/P floor
 static const float3 kW = float3(0.212639, 0.715169, 0.072192);
@@ -137,7 +148,14 @@ float ZoneGain(float I) {
 // feature, a lighter box around the letters on a dark jacket (Alan Wake 2).
 // NR's measured overshoot there is 2-4 NR px and 0.1 stop deep, well inside
 // the fine band; wider halos need a larger Detail radius.
-float3 ShapeEdit(Edit x, float aB, float aD, float3 c, float m) {
+//
+// `silhouette` (0..1) is how close the pixel sits to the near side of a depth
+// edge (look_compose).  There, the brightening's gain falls from g toward a
+// single pass's 1 as Rim goes 0 -> 1, then toward 0 as Rim goes 1 -> 2: the
+// glow NR puts on skin at a character's outline looks real once and wrong
+// when Strength doubles it.  Darkening keeps g.  The blend over the first
+// 0.05 stop of brightening keeps the colour gain continuous where a = 0.
+float3 ShapeEdit(Edit x, float aB, float aD, float3 c, float m, float silhouette) {
   aD -= Halo * smoothstep(1.0, 3.0, m - x.I) * min(aD, 0.0);
   float a = Tone * aB + Detail * aD;
   a = Brighten * max(a, 0.0) + Darken * min(a, 0.0);
@@ -147,8 +165,11 @@ float3 ShapeEdit(Edit x, float aB, float aD, float3 c, float m) {
   ColourSplit(c, x.lp, c_r, c_t, s);
   c = s * (ColourGain * c_r + HueGain * c_t) + (1.0 - s) * ColourGain * c;
   const float g = Strength * ZoneGain(x.I);
-  a *= g;
-  c *= g;
+  const float g_rim = lerp(g, min(g, 1.0), saturate(Rim) * silhouette)
+      * (1.0 - saturate(Rim - 1.0) * silhouette);
+  const float k = lerp(g, g_rim, smoothstep(0.0, 0.05, a));
+  a *= k;
+  c *= k;
   // fxc expands tanh(x) as (e^x - e^-x) / (e^x + e^-x): past |x| ~ 88 e^x
   // overflows and the result is Inf * 0 = NaN, a white pixel (EditRig T7,
   // every gain 2 under 0.25-stop knees).  tanh(10) is 1.0 in float32, so the
